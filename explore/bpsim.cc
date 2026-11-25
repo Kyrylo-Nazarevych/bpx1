@@ -350,7 +350,7 @@ struct OgehlP : Pred {
 struct TageP : Pred {
     Tourn base; bool hasG; int basemode, share;
     int nt; int ent[8], lg[8], tb[8], hl[8];
-    int cb, ub, cmax, umax, half, ua_bits, ua, ua_mid, ua_max, alloc, W, altw; u32 lfsr = 0xACE1u;
+    int cb, ub, cmax, umax, half, ua_bits, ua, ua_mid, ua_max, alloc, W, altw, lw; u32 lfsr = 0xACE1u;
     struct E { uint16_t tag; uint8_t ctr, u; };
     vector<E> T[8];
     struct L { int idx[8]; u32 tag[8]; bool hit[8]; int prov, alt; bool bpred, ppred, apred, pred, weak; };
@@ -365,6 +365,7 @@ struct TageP : Pred {
         cb = p.geti("cb", 3); ub = p.geti("ub", 1); cmax = (1 << cb) - 1; umax = (1 << ub) - 1; half = 1 << (cb - 1);
         ua_bits = p.geti("ua", 4); ua_max = (1 << max(ua_bits, 1)) - 1; ua_mid = (ua_max + 1) / 2; ua = ua_mid;
         alloc = p.geti("alloc", 0); W = p.geti("W", 10); altw = p.geti("altw", 1);
+        lw = p.geti("lw", 16); if (lw == 8) lfsr = 0xE1u;   // allocation LFSR: 16 bits (taps 0xB400) or 8 bits (taps 0xB8)
         for (int i = 0; i < nt; i++) T[i].assign(ent[i], {0, (uint8_t)(half - 1), 0});
     }
     inline bool basepred(const Ctx& c) const { return hasG ? base.pred(c) : base.b.pred(c); }
@@ -403,7 +404,7 @@ struct TageP : Pred {
             if (nc) {
                 int pick = 0;
                 if (alloc == 1) {  // geometric preference for the shortest history, from an LFSR stepped at resolve
-                    lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & 0xB400u);
+                    lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & (lw == 8 ? 0xB8u : 0xB400u));
                     while (pick < nc - 1 && ((lfsr >> pick) & 1)) pick++;
                 }
                 E& n = T[cand[pick]][l.idx[cand[pick]]];

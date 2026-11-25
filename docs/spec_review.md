@@ -75,7 +75,13 @@ construction (H1). Each has a resolution below; none needs a waiver if the owner
 | AL-09: Verilog, SystemVerilog or a generator | "Code the digital system using Verilog" | Verilog-2005 only. |
 | Section 0: the prototype is "a placeholder to replace" | Do not follow or trust anything in the prototype | Only platform files were taken from the old repository (the Tiny Tapeout workflow files and flow defaults, which are the template's) and the benchmark C sources (EX-01). No design content was read for reuse. |
 
-## 6. Open questions for the owners
+## 6. Owners' decisions (26 Nov 2026)
 
-See the gate report; in short: the repository name and access (Q1), the U1 CPU pipeline (Q2), whether well-known
-external benchmark suites may be downloaded (Q3), and whether the Vulkos limits still apply to the new repository (Q4).
+| # | Question | Decision |
+| --- | --- | --- |
+| Q1 | Repository | New public repository `Kyrylo-Nazarevych/bpx1`. |
+| Q2 | U1 CPU pipeline (R3) | Delegated to the architect: "choose the pipeline that gets the most out of BPX-1, including a branch-target buffer at fetch", documented as the contract the team builds, with the sensitivity reported. The contract is docs/SPEC.md section 9. |
+| Q3 | External benchmark suites | Allowed (Embench, CoreMark, MiBench and similar) where the licence permits; nothing that may not be redistributed is committed. They are fetched by `bench/ext/build_ext.sh`. |
+| Q4 | Vulkos import limits (H5) | Do not apply to the new repository. |
+| R1, R2 and the other readings in sections 1–3 | | Accepted. |
+| Extra compute | | Rented machines on the owners' Vast.ai account may be used up to $12 in total, labelled `bpx1-*`, destroyed when idle, spend reported at every gate; sweeps run on the full benchmark set, not a sample. |

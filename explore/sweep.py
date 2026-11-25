@@ -3,7 +3,9 @@
 
   sweep.py run <stage> [opt=val ...]   generate the stage's candidate list, run bpsim on every benchmark, aggregate
   sweep.py show <stage> [top=N sort=key]   print the aggregate table of a finished stage
+  sweep.py chips <tag>                 whole-chip report of a finished "chips" run (bits and area of the whole chip)
   sweep.py pareto <stage>...           Pareto chart(s) -> out/explore/pareto_<stage>.png
+  sweep.py list <stage> <file>         only write the stage's candidate list (to run bpsim elsewhere)
 
 Aggregates (one value per candidate; every program has equal weight):
   acc_seq / acc_cpu   arithmetic mean over programs of prediction accuracy (one in flight / in the U1 CPU model), %
@@ -122,71 +124,181 @@ def stage_families():
     return c
 
 
-def chip_name(nb, ng, gh, nt, e, tb, cb, ub, lmin, lmax, base, ua, alloc, extra=""):
-    return f"c_b{nb}_g{ng}h{gh}_T{nt}x{e}t{tb}c{cb}u{ub}_L{lmin}-{lmax}_{base}_a{ua}{alloc}{extra}"
-
-
-def chip_cfg(nb, ng, gh, nt, e, tb, cb, ub, lmin, lmax, base, ua, alloc, extra="", **kw):
-    """One whole-chip candidate: reference tables (bimodal nb, gshare ng/gh, chooser nb) shared with a default
-    predictor made of nt tagged tables over base = 'bim' (the bimodal table) or 'trn' (the tournament)."""
-    th = geo(lmin, lmax, nt)
-    k = dict(cb=cb, ub=ub, ua=ua, alloc=alloc)
+def chip_line(nb, ng, gh, te, tt, th, base="trn", cb=3, ub=2, ua=4, alloc=0, tag="", **kw):
+    """One whole-chip candidate: the reference tables (bimodal nb, gshare ng with gh history bits, chooser nb) and a
+    default predictor of tagged tables (entries te, tag bits tt, history lengths th) over base = 'bim' (the
+    reference bimodal table) or 'trn' (the reference tournament).  rng/rgh record the reference gshare even when
+    the default predictor does not use it, so that the chip cost can be computed from the line."""
+    j = lambda v: "-".join(map(str, v))
+    name = f"c_b{nb}_g{ng}h{gh}_E{j(te)}_t{j(tt)}_H{j(th)}_c{cb}u{ub}a{ua}{alloc}_{base}{tag}"
+    k = dict(cb=cb, ub=ub, ua=ua, alloc=alloc, rng=ng, rgh=gh)
     if base == "trn":
         k.update(gn=ng, gh=gh, cn=nb)
     k.update(kw)
-    return tage(chip_name(nb, ng, gh, nt, e, tb, cb, ub, lmin, lmax, base, ua, alloc, extra), nb, [e] * nt, [tb] * nt, th, **k)
+    return tage(name, nb, te, tt, th, **k)
+
+
+LMAX = {1: 8, 2: 14, 3: 20, 4: 24}
+SHAPES = ([16, 16], [32, 32], [16, 32], [32, 16], [64, 64], [32, 64], [16, 16, 16], [32, 32, 32], [16, 32, 32], [16, 16, 32],
+          [64], [32], [16, 16, 16, 16])
 
 
 def stage_chips():
-    """Whole-chip candidates (FR-07 references + default sharing their tables), coordinate sweeps around a centre."""
-    centre = dict(nb=64, ng=128, gh=6, nt=2, e=32, tb=7, cb=3, ub=1, lmin=4, lmax=14, base="bim", ua=4, alloc=0)
+    """Whole-chip candidates (FR-07 references + a default predictor sharing their tables)."""
     seen, c = set(), []
 
-    def add(**ch):
-        p = dict(centre)
-        p.update(ch)
-        s = chip_cfg(**p)
-        if s.split()[0] not in seen:
-            seen.add(s.split()[0])
-            c.append(s)
+    def add(line):
+        n = line.split()[0]
+        if n not in seen:
+            seen.add(n)
+            c.append(line)
 
-    for base in ("bim", "trn"):
-        for nb in (32, 64, 128):
-            for ng, gh in ((64, 4), (128, 4), (128, 6), (256, 6), (256, 8)):
-                for nt, e in ((1, 32), (1, 64), (2, 16), (2, 32), (3, 16), (3, 32), (2, 64), (4, 16)):
-                    for tb in (5, 6, 7, 8):
-                        add(base=base, nb=nb, ng=ng, gh=gh, nt=nt, e=e, tb=tb)
-        for nt, e in ((2, 32), (3, 16), (3, 32), (2, 16)):
-            for lmin in (2, 3, 4, 6):
-                for lmax in (8, 11, 14, 18, 24, 32):
-                    if nt > 1 and lmax > lmin:
-                        add(base=base, nt=nt, e=e, lmin=lmin, lmax=lmax)
+    # A. table shapes, tag widths and reference sizes
+    for nb in (32, 64, 128):
+        for ng, gh in ((64, 4), (64, 6), (128, 5), (128, 6), (128, 7), (256, 6), (256, 8)):
+            for te in SHAPES:
+                for tb in (5, 6, 7, 8):
+                    add(chip_line(nb, ng, gh, te, [tb] * len(te), geo(4, LMAX[len(te)], len(te))))
+    # B. history lengths
+    for te in ([32, 32], [16, 16], [32, 32, 32], [16, 16, 16], [16, 32]):
+        for lmin in (2, 3, 4, 5, 6, 8):
+            for lmax in (8, 10, 12, 14, 16, 18, 20, 24, 28, 32):
+                if lmax > lmin + 1:
+                    add(chip_line(64, 128, 6, te, [7] * len(te), geo(lmin, lmax, len(te))))
+    # C. policies
+    for te in ([32, 32], [16, 16, 16]):
+        th = geo(4, LMAX[len(te)], len(te))
+        for base in ("bim", "trn"):
             for cb in (2, 3):
                 for ub in (1, 2):
-                    for ua in (0, 4):
+                    for ua in (0, 3, 4, 5):
                         for alloc in (0, 1):
-                            add(base=base, nt=nt, e=e, cb=cb, ub=ub, ua=ua, alloc=alloc)
+                            for altw in (0, 1):
+                                add(chip_line(64, 128, 6, te, [7] * len(te), th, base=base, cb=cb, ub=ub, ua=ua, alloc=alloc,
+                                              tag="" if altw else "_noaltw", altw=altw))
+        # D. loop predictor on top
+        for ln in (2, 4, 8):
+            for lcnt in (6, 8):
+                for ltag in (6, 8):
+                    add(chip_line(64, 128, 6, te, [7] * len(te), th, tag=f"_loop{ln}c{lcnt}t{ltag}", ln=ln, lcnt=lcnt, ltag=ltag))
+        # E. agree-coded private base (the host sends a static hint bit)
+        add(chip_line(64, 128, 6, te, [7] * len(te), th, base="bim", tag="_agree", bagree=1))
     return c
 
 
-def chip_cost(name):
-    """Storage bits and synthesised table area of a whole-chip candidate, from its name (reference tables included
-    whether or not the default predictor uses them; bimodal and chooser share one two-field table)."""
-    import re
-    m = re.match(r"c_b(\d+)_g(\d+)h(\d+)_T(\d+)x(\d+)t(\d+)c(\d+)u(\d+)_L(\d+)-(\d+)_(\w+?)_a(\d)(\d)", name)
-    nb, ng, gh, nt, e, tb, cb, ub, lmin, lmax = map(int, m.groups()[:10])
+def stage_chips2():
+    """Refinement around the best whole-chip shapes of stage 'chips' (tournament base, 3-bit counters)."""
+    seen, c = set(), []
+
+    def add(line):
+        n = line.split()[0]
+        if n not in seen:
+            seen.add(n)
+            c.append(line)
+
+    def var(nb, ng, gh, te, tb, th, ub=2, alloc=1, chist=0, cn=None, lw=16, **kw):
+        tag = ("_lfsr%d" % lw if alloc and lw != 16 else "") + ("_ch%d" % (cn or nb) if chist else "")
+        k = dict(kw)
+        if alloc:
+            k["lw"] = lw
+        if chist:
+            k.update(chist=1, cn=cn or nb)
+        l = chip_line(nb, ng, gh, te, [tb] * len(te), th, ub=ub, alloc=alloc, tag=tag, **k)
+        if chist:   # chip_line sets cn=nb for the tournament base; override
+            l = l.replace(f" cn={nb} ", f" cn={cn or nb} ", 1) if f" cn={nb} " in l else l
+        add(l)
+
+    h3 = [(a, b, d) for a in (3, 4, 5, 6) for b in (7, 9, 11, 13) for d in (14, 17, 20, 24, 28, 32) if b > a + 1 and d > b + 2]
+    h2 = [(a, b) for a in (4, 5, 6, 8) for b in (10, 12, 14, 17, 20, 24)]
+    h4 = [tuple(geo(a, b, 4)) for a in (3, 4, 5) for b in (20, 24, 28, 32)]
+    # (a) history lengths, per shape, with and without LFSR allocation, 1 or 2 useful bits, chooser by id or history
+    for te, hs in (([16, 16, 16], h3), ([32, 32, 32], h3), ([16, 16, 32], h3), ([16, 16, 16, 16], h4), ([32, 32], h2), ([16, 32], h2), ([16, 16], h2)):
+        for th in hs:
+            for alloc in (0, 1):
+                for ub in (1, 2):
+                    for chist in (0, 1):
+                        var(64, 128, 6, te, 7, list(th), ub=ub, alloc=alloc, chist=chist)
+    # (b) reference sizes and tag width at the centre histories
+    for te, th in (([16, 16, 16], [4, 9, 20]), ([32, 32], [4, 14]), ([16, 16, 16, 16], [4, 7, 13, 24])):
+        for nb in (32, 64, 128):
+            for ng, gh in ((64, 3), (64, 4), (128, 4), (128, 5), (128, 6), (128, 7), (256, 5), (256, 6)):
+                for tb in (5, 6, 7, 8, 9):
+                    for chist in (0, 1):
+                        var(nb, ng, gh, te, tb, th, chist=chist)
+    # (c) chooser size when indexed by history; 8-bit allocation LFSR
+    for te, th in (([16, 16, 16], [4, 9, 20]), ([16, 16, 16, 16], [4, 7, 13, 24])):
+        for cn in (16, 32, 64, 128):
+            var(64, 128, 6, te, 7, th, chist=1, cn=cn)
+        var(64, 128, 6, te, 7, th, lw=8)
+        var(64, 128, 6, te, 7, th, lw=8, chist=1)
+    return c
+
+
+def parse_line(line):
+    t = line.split()
+    return t[0], t[1], dict(x.split("=", 1) for x in t[2:])
+
+
+def chip_cost(params):
+    """Storage bits and estimated area (tables by the synthesis fit, logic in drive-strength-2 cells) of a whole-chip
+    candidate.  Bimodal and chooser share one two-field table; an agree-coded base needs a private bimodal table."""
+    ints = lambda k: [int(x) for x in params[k].split(",")]
+    nb, ng, gh = int(params["bn"]), int(params["rng"]), int(params["rgh"])
+    te, tt, th = ints("te"), ints("tt"), ints("th")
+    cb, ub = int(params.get("cb", 3)), int(params.get("ub", 1))
     tab = lambda n, w: 550 + n * (20.5 * w + 6.5)
-    bits = 4 * nb + 2 * ng + nt * e * (tb + cb + ub)
-    area = tab(nb, 4) + tab(ng, 2) + nt * tab(e, tb + cb + ub)
-    # per tagged table: hashing XORs, tag comparator, update logic, staging flops (drive-strength-2 cells)
-    th = geo(lmin, lmax, nt)
-    lg = e.bit_length() - 1
-    logic = sum(16.3 * (max(h - lg, 0) + lg + max(h - tb, 0) + tb) + 20 * tb + 300 + 21.3 * (cb + ub + 1) for h in th)
-    logic += 16.3 * gh + 2 * 21.3 * max(th + [gh]) + 11.3 * max(th + [gh])
-    return bits, area + logic
+    priv = int(params.get("bagree", 0))
+    bits = 4 * nb + 2 * ng + sum(e * (t + cb + ub) for e, t in zip(te, tt)) + (2 * nb if priv else 0)
+    area = tab(nb, 4) + tab(ng, 2) + sum(tab(e, t + cb + ub) for e, t in zip(te, tt)) + (tab(nb, 2) if priv else 0)
+    if int(params.get("chist", 0)):       # a chooser indexed by history cannot share the bimodal table's address
+        nc = int(params.get("cn", nb))
+        bits += 2 * nc - 2 * nb
+        area += tab(nb, 2) + tab(nc, 2) - tab(nb, 4)
+    if int(params.get("alloc", 0)):
+        area += int(params.get("lw", 16)) * 21.3 + 50
+    for e, t, h in zip(te, tt, th):
+        lg = e.bit_length() - 1
+        area += 16.3 * (max(h - lg, 0) + lg + max(h - t, 0) + t) + 20 * t + 300 + 21.3 * (cb + ub + 1)
+    hm = max(th + [gh])
+    area += 16.3 * gh + 2 * 21.3 * hm + 11.3 * hm
+    ln = int(params.get("ln", 0))
+    if ln:
+        eb = int(params.get("ltag", 8)) + 2 * int(params.get("lcnt", 7)) + 6
+        bits += ln * eb
+        area += ln * eb * 22.5 + 800
+    return bits, area
 
 
-STAGES = {"refs": stage_refs, "families": stage_families, "chips": stage_chips}
+def load_chips(tag="chips"):
+    """Aggregate of a chips run with chip bits and area attached (cbits, carea)."""
+    agg = aggregate(os.path.join(OUT, tag + ".tsv"))
+    par = {}
+    for line in open(os.path.join(OUT, tag + ".cfg")):
+        if line.strip():
+            n, _, p = parse_line(line)
+            par[n] = p
+    for x in agg:
+        x["params"] = par[x["config"]]
+        x["cbits"], x["carea"] = chip_cost(par[x["config"]])
+    return agg
+
+
+def report_chips(tag="chips", caps=(900, 1000, 1100, 1200, 1300, 1400, 1500, 1700)):
+    agg = load_chips(tag)
+    print(f"{len(agg)} whole-chip candidates on {len(agg[0]['per'])} programs")
+    row = lambda x: (f"  {x['config']:58s} bits={x['cbits']:5.0f} area~{x['carea']:6.0f} acc={x['acc_cpu']:.3f} (seq {x['acc_seq']:.3f}) "
+                     f"mpki={x['mpki']:.3f} speedup={x['speedup']:.4f} worst={x['worst']:.2f} {x['worst_prog']}")
+    for cap in caps:
+        r = sorted([x for x in agg if x["cbits"] <= cap], key=lambda x: -x["speedup"])
+        print(f"=== best 6 by speedup with chip bits <= {cap}")
+        for x in r[:6]:
+            print(row(x))
+    print("=== Pareto frontier: estimated area against speedup")
+    for x in pareto_front([dict(x, area=x["carea"]) for x in agg], "area", "speedup"):
+        print(row(x))
+
+
+STAGES = {"refs": stage_refs, "families": stage_families, "chips": stage_chips, "chips2": stage_chips2}
 
 
 # ------------------------------------------------------------------------------------------- run / aggregate
@@ -276,9 +388,17 @@ def main():
     elif cmd == "show":
         agg = aggregate(os.path.join(OUT, stage + ".tsv"))
         show(agg, int(opts.get("top", 40)), opts.get("sort", "speedup"), opts.get("flt"))
+    elif cmd == "chips":
+        report_chips(stage)
     elif cmd == "pareto":
         for st in sys.argv[2:]:
             plot(st, aggregate(os.path.join(OUT, st + ".tsv")))
+    elif cmd == "list":
+        cands = STAGES[stage]()
+        with open(sys.argv[3], "w") as f:
+            for line in cands:
+                print(line, file=f)
+        print(len(cands), "candidates ->", sys.argv[3])
     else:
         sys.exit(__doc__)
 
