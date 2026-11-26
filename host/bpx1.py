@@ -16,7 +16,14 @@
 OP_SPECIAL, OP_PREDICT, OP_PR_NT, OP_PR_T = 0, 1, 2, 3
 SUB_NOP, SUB_FLUSH, SUB_RESOLVE_NT, SUB_RESOLVE_T = 0, 1, 2, 3
 REG_ID, REG_CTRL, REG_CMD, REG_STATUS, REG_ERRCNT, REG_STATS, REG_RAW_ADDR, REG_RAW_DATA = 0, 1, 2, 3, 4, 5, 0x0F, 0x10
+REG_FCTL, REG_FSTAT = 0x11, 0x12
 CMD_SOFT_RESET, CMD_CLEAR_PRED, CMD_CLEAR_STATS, CMD_SNAPSHOT, CMD_SNAPSHOT_CLEAR = 1, 2, 4, 8, 16
+# mosaic experiments (docs/mosaic.md 7.2): FCTL bits; FCTL = 0 is the plain chip
+FCTL_TWIN_EN, FCTL_TWIN_USE, FCTL_RESTORE, FCTL_DBGF = 1, 2, 16, 0x4000
+CODE_NONE, CODE_PARITY, CODE_SECDED, CODE_DETECT = 0, 1, 2, 3
+# FSTAT (sticky, cleared by CMD_CLEAR_STATS and reset) and fault events 0-3 on DBG with FCTL_DBGF
+TW_ERR, TW_COR, TW_DET, TW_SDC = 1, 2, 4, 8
+SPACE_BC, SPACE_G, SPACE_SMALL, SPACE_W0, SPACE_W3, SPACE_TWIN = 0, 1, 7, 8, 11, 12
 DRIVE = ("default", "bimodal", "gshare", "tournament", "static not-taken")
 
 
@@ -152,11 +159,47 @@ class Bpx1Host:
                     errors=w[1] & 0xFF, err_flags=(w[0] >> 8) & 0xF, in_flight=w[0] & 7)
 
     def dump(self, space, count):
-        """Raw state (FR-10): space 0 bimodal+chooser, 1 gshare, 7 small registers, 8.. weight tables."""
+        """Raw state (FR-10): space 0 bimodal+chooser, 1 gshare, 7 small registers, 8.. weight tables,
+        12 the leaky twin of W3 ({check[3:0], data[3:0]}; reads 0 unless FCTL_TWIN_EN)."""
         self.write(REG_RAW_ADDR, 0x8000 | (space << 8))
         for _ in range(8):
             self.idle()
         return [self.read(REG_RAW_DATA)[0] for _ in range(count)]
+
+    def raw_write(self, space, addr, value, fields=3):
+        """Raw write of one entry (fields: write enables, bit 0 first field, bit 1 second field).  Fault injection:
+        a twin word (space 12) or W3 (space 11, which leaves the twin as it is)."""
+        self.write(REG_RAW_ADDR, (fields << 12) | (space << 8) | (addr & 0x7F))
+        for _ in range(8):
+            self.idle()
+        self.write(REG_RAW_DATA, value)
+        for _ in range(12):
+            self.idle()
+
+    # ---------------------------------------------------------------- mosaic (docs/mosaic.md 7.2, 7.3)
+    def set_fctl(self, twin=False, use=False, code=CODE_NONE, restore=False, dbgf=False, other=0):
+        """twin: let the leaky twin's data through (compare, flags, events); use: the default predictor sums the
+        twin's weight instead of W3's; code: protection of the twin (0 none, 1 parity -> abstain, 2 SEC-DED,
+        3 detect all -> abstain); restore: restore-on-use; dbgf: the DBG selections index the fault events;
+        other: the remaining FCTL bits as a word (their functions come with later steps)."""
+        v = (other & ~0x401F) | (FCTL_TWIN_EN if twin else 0) | (FCTL_TWIN_USE if use else 0) | ((code & 3) << 2)
+        v |= (FCTL_RESTORE if restore else 0) | (FCTL_DBGF if dbgf else 0)
+        self.write(REG_FCTL, v)
+        return v
+
+    def fstat(self, clear=False):
+        """Sticky fault flags {TW_SDC, TW_DET, TW_COR, TW_ERR}; clear=True clears them with the statistics."""
+        v = self.read(REG_FSTAT)[0]
+        if clear:
+            self.command(CMD_CLEAR_STATS)
+        return v
+
+    @staticmethod
+    def twin_word(weight):
+        """Code word of a 4-bit weight as the twin stores it: c_k = XOR of the three data bits other than d_k."""
+        d = weight & 15
+        b = [(d >> k) & 1 for k in range(4)]
+        return sum((b[0] ^ b[1] ^ b[2] ^ b[3] ^ b[k]) << (4 + k) for k in range(4)) | d
 
     # ---------------------------------------------------------------- trace replay
     def replay(self, trace):

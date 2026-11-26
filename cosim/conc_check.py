@@ -9,7 +9,8 @@ hi = requests started by then.  This script replays the steps through the golden
 word, that it equals the model's value after some whole number n of requests, lo <= n <= hi:
   statistics   all five counters from the same n (the snapshot is consistent), as running totals over all
                snapshot-and-clear steps: no event is lost or counted twice
-  raw reads    the entry as it is after n requests: never a half-written or stale value
+  raw reads    the entry as it is after n requests: never a half-written or stale value (space 12, the leaky
+               twin, included: FCTL, and with it the read mask TWIN_EN, changes only between foreground steps)
   ERRCNT and the error flags lie between their values at lo and at hi; ID and CTRL are exact
 """
 import sys
@@ -102,6 +103,8 @@ def main():
             n += 1
         elif t[0] == "W" and t[1] == "1":
             m.write_ctrl(int(t[2]))
+        elif t[0] == "W" and t[1] == "17":                # FCTL (the twin's raw reads depend on TWIN_EN)
+            m.write_fctl(int(t[2]))
         elif t[0] == "W" and t[1] == "15":
             raw_addr = int(t[2])
         elif t[0] == "W" and t[1] == "16":

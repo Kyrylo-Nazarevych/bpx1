@@ -140,6 +140,7 @@ static void wait_ready() {
 // plays the steps written by model/randgen.py; one latency byte per request goes to latpath
 // Background jobs (lines "X ..." of the steps file) run while the requests go on; what they read is written to
 // the log with the window of requests it may reflect, and cosim/conc_check.py compares it with the model.
+// "G addr value" reads one register (FCTL 0x11, FSTAT 0x12) in the foreground and compares it.
 static char bg_kind = 0; static int bg_a = 0, bg_b = 0, bg_c = 0;
 static u64 bg_jobs = 0, bg_dropped = 0;
 static void bg_idle() { int n = 0; while (bg_busy()) { tick(); if (++n > 100000) { fprintf(stderr, "control port stuck\n"); exit(3); } } }
@@ -221,6 +222,12 @@ static int rand_play(const char* path, const char* latpath, const char* clpath) 
             for (int k = 0; k < 5; k++) ok = ok && (w[2 + 2 * k] | ((u64)w[3 + 2 * k] << 16)) == e[k];
             if (!ok) { if (!sbad) fprintf(stderr, "line %llu: statistics differ: status %04x errors %u resolved %u, model flags %llu errors %llu resolved %llu\n",
                                          (unsigned long long)line, w[0], w[1], w[2], (unsigned long long)e[6], (unsigned long long)e[5], (unsigned long long)e[0]); sbad++; }
+            nstat++;
+        } else if (c == 'G') {                               // one register (FCTL, FSTAT), counted with the statistics checks
+            int a; u32 e, g;
+            if (fscanf(f, "%d %u", &a, &e) != 2) return 2;
+            spi(a, false, &g, 1);
+            if (g != e) { if (!sbad) fprintf(stderr, "line %llu: register 0x%02x is %04x, model %04x\n", (unsigned long long)line, a, g, e); sbad++; }
             nstat++;
         } else if (c == 'D') {
             int space, cnt;

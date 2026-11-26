@@ -143,6 +143,13 @@ Fault events (DBG pins with FCTL[14] = 1; same timing as the standard events): 0
 prediction as it would be without the twin (from W3), others 0. Twin events belong to the predict just
 acknowledged.
 
+As built in step 3: all 16 FCTL bits are storage (bits without a function yet are read back as written); FSTAT
+bits 0–3 and fault events 0–3 and 10 exist, the others read 0. Events 0–3 are one-clock pulses that the DBG flops
+show together with the `ACK` of the predict (like the prediction events); event 10 is a level, the W3-only
+default prediction of the last predict. **Added rule:** a write of FCTL that changes TWIN_EN or CODE clears the
+staging-valid bit, so the oldest branch is looked up again (see 7.3, restore-on-use); a write that changes neither
+does not touch the staging register, so writing FCTL = 0 over 0 changes nothing at all.
+
 ### 7.3 The leaky twin W3L
 
 - Storage: `bpx_ltab #(.AW(5), .RW(3), .EW0(8), .DYN(1))`; word = {check[3:0], data[3:0]}; check bits
@@ -165,6 +172,30 @@ acknowledged.
   step), the twin's entry of that branch is rewritten with the word read at its commit lookup, corrected if CODE = 2
   and the error was single, otherwise as read. Eight more staging bits. In simulation this changes nothing unless a
   fault was injected.
+
+**As built in step 3 (where it differs or is more precise than the above):**
+
+- Staging and exactness. The core already keeps the golden model transaction-exact by one rule: the staging
+  register is a copy of the oldest branch's commit lookup, and every event that can change what that lookup would
+  read clears its valid bit (a resolve, a raw write of any table, a clear, a flush); the branch is then looked up
+  again before it resolves. The twin follows the same rule: its staged word is the masked (TWIN_EN), decoded (CODE)
+  word as restore-on-use would write it, so a change of TWIN_EN or CODE must also invalidate the staging register
+  (the added FCTL rule in 7.2). With it the model can read the twin at resolve time, as it reads every table, and
+  stays exact; without it a resolve would restore a word read under the old setting (a mutation that removes the
+  rule is caught by the random regression, section 9). RESTORE itself is taken at the resolve.
+- "Corrected if the error was single" is implemented as the decoder sees it: if SEC-DED corrected the word (odd
+  parity), the corrected code word is written back; a triple error is miscorrected and written back miscorrected.
+  Nothing on the chip can tell a single from a triple error, so this is the nearest exact rule.
+- Flags are computed at every executed predict with TWIN_EN = 1, with or without TWIN_USE. TW_COR is set for a
+  corrected data bit, a corrected check bit and a miscorrection alike; TW_SDC means "not abstained and the decoded
+  twin weight differs from W3's", whether or not the sum uses it, so a miscorrection sets TW_COR and TW_SDC.
+- Raw space 12 reads through the same TWIN_EN mask (0 while the twin is off); writes always work.
+- The mask is eight named `and2_1` cells (`keep`) right at the twin's read output, so no restructuring can let an
+  unknown through: with TWIN_EN = 0 the decoder, the staging bits, the comparison, the raw read and the flags all
+  see 0 (gate-level test with FCTL[0] = 0: passes, section 9).
+- Event 10 needs the prediction with W3 as well as the one with the twin: `bpx_psum` shares the sum of tables 0–2
+  and the reference terms and adds the last term twice (one more 8-bit adder). Abstain is a per-table `skip` input.
+- The twin's RW is `LGT > 4 ? 3 : 2` like the weight tables (3 on the chip: 8 rows × 4 columns).
 
 ### 7.4 Write-pulse selector (W0–W2 only)
 
@@ -209,8 +240,8 @@ and reset.
 ## 8. Steps
 
 1. [done] Probe: branch `probe-leaky`, local build clean, pushed for CI.
-2. Trims (7.1), re-verify, local build for the new area baseline.
-3. Registers (7.2), leaky twin (7.3): RTL, model, random generator, tests; local build.
+2. [done] Trims (7.1), re-verify, local build for the new area baseline.
+3. [done] Registers (7.2), leaky twin (7.3): RTL, model, random generator, tests; local build.
 4. Pulse selector (7.4); canary, checkers, watchdog (7.5); demotion (7.6); formal.
 5. gshare randomness, oscillators, strap (7.7); local build.
 6. Full regression (co-simulation of the 71 programs, random plain and concurrent, formal, cocotb, local build),
@@ -269,3 +300,52 @@ campaign): labels `bpx1-*`, destroy when idle, $12 total cap.
   +3.87; worst path BC table → reference terms of the sum → CONF; probably the ×3 weights, which need an adder where
   ×4 was a shift, ESTIMATED), hold +0.056 ns, 2,140 max-slew / 3 max-cap warnings (was 2,259 / 5), gate-level test
   3/3. Synthesised 49,406 µm² (was 54,112): weight tables 4 × 3,237, the two sums 2 × 1,107.
+- 26 Nov, step 3 (registers 7.2, leaky twin 7.3) **(VERIFIED, this session)**. Reference-input weights back to
+  (2, 4, 4), θ 10 (RTL, model, `cosim/bpsim.cfg`, SPEC; |sum| ≤ 4 × 15 + 6 + 12 + 4 = 82 < 128, SB = 8 holds):
+  equal to (2, 3, 3) within noise in the sweep above, and ×4 is a shift where ×3 needed an adder on the critical
+  path. FCTL (all 16 bits storage), FSTAT bits 0–3, fault events 0–3 and 10, raw space 12, the twin (`bpx_ltab`
+  DYN, AW 5, RW 3, EW0 8) with mask, decoder, abstain (`bpx_psum` skip input), TWIN_USE, flags, restore-on-use
+  and 8 staging bits; the departures from 7.2/7.3 are listed there ("As built in step 3"). Model, random generator
+  (random FCTL in mid-stream, injection of 1/2/3-bit flips into twin words and of new W3 weights, FSTAT reads and
+  clears, a staging probe for the FCTL rule; `RG_PLAIN=1` keeps FCTL at 0), cosim (`G` register checks, space 12
+  in the state dump), conc_check, coverage (49 new bins), test.py (`mosaic_registers`, also at gate level;
+  `twin_directed`, RTL), host helpers. Verification:
+  - cocotb latch cells / flip-flop model / repository top: 5/5 each.
+  - Random 4 × 50,000 and 10 × 100,000, plain and concurrent: 0 reply, statistics, state and background
+    mismatches; coverage 100 % (cross 52/52 reachable, other 158/158). Twin bins over 10 × 100,000: every
+    reachable CODE × outcome × TWIN_USE combination hit (smallest: parity / wrong word, right weight / observe,
+    30); restore-on-use rewrote a clean word 61,333, a corrected word 102, an erroneous word as read 931; each
+    FSTAT flag set (67–118) and cleared (64–109); fault events 0, 1, 2, 3, 10 seen on DBG; TWIN_USE changed the
+    default prediction 587 times. Outcomes that cannot occur, by construction of the codes: no code → abstain or
+    correction; parity → correction; SEC-DED and detect-all → a wrong word with the right weight; detect-all →
+    correction.
+  - FCTL = 0: random `RG_PLAIN=1` 4 × 50,000 plain and concurrent, 0 mismatches; co-simulation of
+    embench.nettle-aes, numeric.mandelbrot, embench.crc32 (cosim/run.sh, FCTL never written): 0 model
+    mismatches, statistics equal the model, mispredictions of all four predictors in flight and of the default
+    one-in-flight equal `explore/bpsim` with ug = 4, ut = 4, θ 10 on 3 of 3 (default in flight 22,697 / 6,258 /
+    515).
+  - Mutation check (2 × 20,000 random each): removing the FCTL staging rule, restoring the raw instead of the
+    corrected word, a wrong correction position, event 10 from the twin-side prediction, the raw read without the
+    mask, TW_SDC without the abstain condition: each caught (the first only after the staging probe was added to
+    the generator; without it 2 × 20,000 missed it).
+  - Formal prove, nowait, cover: pass.
+  - Synthesised by block (Yosys, hierarchy kept): chip 55,991 µm² (was 49,406); twin table 3,757 (256 `einvp_1`
+    and its 32-way read tree), sums 2 × 1,358 (in hierarchical synthesis the unused second last-term adder of the
+    staging sum is not removed; flattened it is), `bpx_pred` own logic 4,593, `bpx_core` own 14,697.
+  - Local build 1 (flow constraints unchanged): 82.5 % instance utilisation, 59,896 µm² cells (was 53,848 /
+    74.2 %), routing DRC 0, Magic DRC 0, LVS 0, antenna 0, hold +0.058 ns, gate-level test 4 passed + 1 skipped
+    (`twin_directed` is RTL only), 256 `einvp_1` in the final netlist, the 8 mask cells present; **setup −2.60 ns at
+    the slow corner (27 endpoints)**, all on one false path: sequencer flop `b` (falling edge) → write pulse →
+    twin write gate → `einvp_1` TE → Z → twin read tree → decoder → sum → CONF. Static timing treats the tri-state
+    enable as a combinational arc; the node only changes during the pulse cycle, whose reads nothing captures
+    (6.2). The same netlist, SPEF and flow SDC in OpenSTA (LibreLane container) reproduce −2.601; with
+    `set_disable_timing` on `einvp_1` TE → Z the worst slack is **+3.706 ns** on the true path address flop →
+    twin read → mask → decoder → sum → CONF.
+  - Fix: `src/bpx.sdc` = the flow's base.sdc plus that one exception, as PNR_SDC_FILE and SIGNOFF_SDC_FILE
+    (`src/config.json`; the clock stays 30 ns). Local build 2: 82.5 % (59,891 µm² cells; timing-repair buffers
+    4,405), routing DRC 0, Magic DRC 0, LVS 0, antenna 0, **setup +3.21 ns at the slow corner, 0 violations**
+    (worst path: address flop → twin read tree → mask → decoder → sum → CONF; then DBG1 +3.99, DBG0 +4.15,
+    speculative history +4.47, PRED +4.52), nominal corner +14.10 ns, hold +0.058 ns, 2,522 max-slew / 9 max-cap
+    warnings (were 2,140 / 3), gate-level test 4 passed + 1 skipped, 256 `einvp_1`. The twin's decoder now sits
+    on the critical path; with ×4 reference weights it still has 1.3 ns more margin than step 2 (+1.87).
+    docs/area.md, which lists every flow setting with its reason, is to be updated at the end of the round.

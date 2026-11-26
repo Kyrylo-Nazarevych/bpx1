@@ -17,6 +17,10 @@
   "//": "Place-and-route may not use the slow clkdlybuf4s25/s50 cells as fan-out buffers: 3 ns on the worst path.",
   "PNR_EXCLUDED_CELL_FILE": "dir::pnr_exclude.cells",
 
+  "//": "The flow's constraints plus one false-path exception: the enable arc of the leaky twin's tri-state cells (reasons and measurements in bpx.sdc).",
+  "PNR_SDC_FILE": "dir::bpx.sdc",
+  "SIGNOFF_SDC_FILE": "dir::bpx.sdc",
+
   "RUN_LINTER": 1,
   "LINTER_INCLUDE_PDK_MODELS": 1,
 

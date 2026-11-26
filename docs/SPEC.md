@@ -153,22 +153,33 @@ single steps. Raw table reads use cycles the predict port leaves free and never 
 | --- | --- | --- | --- |
 | 0x00 | ID | R | `0xB101` |
 | 0x01 | CTRL | RW | `[2:0]` driving predictor: 0 default, 1 bimodal, 2 gshare, 3 tournament, 4–7 static not-taken; `[3]` freeze learning; `[7:4]` DBG0 event; `[11:8]` DBG1 event; `[14:12]` features of the default predictor (section 7): `[12]` reference inputs, `[13]` negation in memory, `[14]` adaptive threshold; `[15]` unused (reads 0, writes ignored). After reset: `0x7DA0`. |
-| 0x02 | CMD | W | bit 0 soft reset; bit 1 clear predictors (tables, histories, in-flight work); bit 2 clear statistics and error flags; bit 3 snapshot the statistics; bit 4 snapshot and clear the counters in one step (no event lost or counted twice) |
+| 0x02 | CMD | W | bit 0 soft reset; bit 1 clear predictors (tables, histories, in-flight work); bit 2 clear statistics, error flags and FSTAT; bit 3 snapshot the statistics; bit 4 snapshot and clear the counters in one step (no event lost or counted twice) |
 | 0x03 | STATUS | R | `[2:0]` in-flight count; `[3]` ready; `[4]` staging valid; `[5]` request pending; `[6]` table write in progress; `[7]` raw access pending; `[8]` resolve refused (queue empty); `[9]` predict refused (queue full); `[10]` request withdrawn; `[11]` statistics overflow (flags are sticky) |
 | 0x04 | ERRCNT | R | `[7:0]` refused or withdrawn requests, saturating |
 | 0x05–0x0E | STATS | R | Snapshot taken by CMD bit 3, two words (low, high) per counter: resolved branches, then mispredictions of default, bimodal, gshare, tournament. Counters are 16 bits and saturate (never wrap; overflow is flagged in STATUS). For exact totals of longer runs use snapshot-and-clear at least every 65,535 branches and add the snapshots up (FR-08). |
-| 0x0F | RAW_ADDR | RW | `[6:0]` entry; `[11:8]` space: 0 bimodal+chooser, 1 gshare, 7 small registers, 8–11 weight tables 0–3; `[13:12]` field write enables; `[15]` address + 1 after each RAW_DATA read |
+| 0x0F | RAW_ADDR | RW | `[6:0]` entry; `[11:8]` space: 0 bimodal+chooser, 1 gshare, 7 small registers, 8–11 weight tables 0–3, 12 the leaky twin of W3; `[13:12]` field write enables; `[15]` address + 1 after each RAW_DATA read |
 | 0x10 | RAW_DATA | RW | Read: the addressed entry (fetched after RAW_ADDR is written and after each read). Write: the entry fields enabled in RAW_ADDR. |
+| 0x11 | FCTL | RW | Mosaic experiments (docs/mosaic.md 7.2); 0 = the plain chip. `[0]` TWIN_EN: the leaky twin's read data is let through (otherwise forced to 0); `[1]` TWIN_USE: the default predictor sums the twin's weight instead of W3's (needs `[0]`); `[3:2]` CODE of the twin: 0 none, 1 parity → abstain, 2 SEC-DED, 3 detect all → abstain; `[4]` RESTORE: restore-on-use; `[14]` DBGF: the DBG selections of CTRL index the fault events; `[13:5]`, `[15]`: storage only in this version (functions planned: write-pulse width, gshare randomness, oscillators, demotion, canary self-test). Reset 0, also by soft reset. A write that changes `[0]` or `[3:2]` invalidates the staging register (it is read again). |
+| 0x12 | FSTAT | R | Sticky fault flags, cleared by CMD bit 2 and by reset: `[0]` TW_ERR a predict read a twin word that is not the code word of W3's weight; `[1]` TW_COR SEC-DED corrected the word; `[2]` TW_DET the code detected an error it did not correct (the weight abstained); `[3]` TW_SDC the twin's weight was not abstained and differed from W3's. Set only at executed predicts with TWIN_EN = 1. `[15:4]` read 0 in this version. |
 
 Raw entries: space 0 `{chooser[1:0], bimodal[1:0]}`; space 1 `gshare[1:0]`; weight tables `w[3:0]` (two's
 complement, write enable bit 12). Space 7: 0–1 committed outcome history, 2–3 speculative outcome history (12 bits
 per word), 4 `{theta[5:0], adaptation counter[3:0]}` (writable), 5 committed path history, 7 speculative path history (6 and 8, the upper path-history
-words, read 0), 9 queue pointers and flags. Every bit of predictor state and
+words, read 0), 9 queue pointers and flags. Space 12, the leaky twin W3L (32 entries, docs/mosaic.md 7.3):
+`{check[3:0], data[3:0]}`, the code word of W3's weight, check bit k = XOR of the three data bits other than
+`data[k]`; reads 0 unless FCTL[0]; written (write enable bit 12) whatever FCTL says. A raw write of W3 (space 11)
+leaves the twin as it is, so faults can be injected into either. Every bit of predictor state and
 configuration is readable while requests run (FR-10); tables and the two small predictor registers are writable.
 
 DBG events (CTRL): 1 request seen, 2 predict done, 3 resolve done, 4 misprediction repair, 5 flush, 6 refusal or
 withdrawal, 7 write-pulse cycle, 8 staging valid, 9 queue empty, 10–13 last predictions (default, bimodal, gshare,
 tournament), 14 control-port word, 15 staging read.
+
+Fault events (the same selections when FCTL[14] = 1, same timing: they change together with `ACK`): 0 TW_ERR,
+1 TW_COR, 2 TW_DET, 3 TW_SDC (each a one-clock pulse with the `ACK` of the predict whose twin read raised the flag),
+10 the default prediction of the last predict computed with W3 instead of the twin (equal to event 10 of the
+standard bank unless TWIN_USE changed it); 4–9 and 11–15 read 0 in this version (planned: canary, checkers,
+watchdog, demotion, divided oscillator, random bit).
 
 ## 5. Reset, ready, `ena`
 
@@ -245,7 +256,8 @@ prediction events change in the same clock as `ACK`; the other events one clock 
 
 ## 7. Predictor algorithm (evidence in docs/perceptron.md and docs/exploration.md)
 
-Total predictor storage: **1,024 bits** in six latch tables. `fold(v, n)` is the XOR of the consecutive n-bit
+Total predictor storage: **1,024 bits** in six latch tables (plus the leaky twin of W3, 256 dynamic bits, an
+experiment that changes nothing while FCTL = 0: register FCTL above and docs/mosaic.md 7.3). `fold(v, n)` is the XOR of the consecutive n-bit
 slices of v; `h[L-1:0]` are the L most recent outcomes of the history in use (bit 0 = most recent); `p[7:0]` is the
 path history: one bit, `ID[0] ^ ID[3]`, of each of the last 8 branches.
 
@@ -270,13 +282,13 @@ when the counter it used is saturated (0 or 3).
 ```
 neg_i = h[L_i]                      for i = 1..3 (the outcome just before the table's history segment); neg_0 = 0
 v_i   = neg_i ? -(2 w_i + 1) : (2 w_i + 1)          = 2 (w_i ^ neg_i) + 1: the stored bits read complemented
-sum   = v_0 + v_1 + v_2 + v_3 + 2 (2 bim - 3) + 3 (2 gsh - 3) + (tournament ? +3 : -3)
+sum   = v_0 + v_1 + v_2 + v_3 + 2 (2 bim - 3) + 4 (2 gsh - 3) + (tournament ? +4 : -4)
 prediction = (sum >= 0)            confidence (FR-11) = |sum| > theta
 ```
 
 **Training** at resolve, from the committed lookup of that branch (committed outcome and path history) and the
 outcome only: if the prediction recomputed at resolve was wrong, or `|sum| <= theta`, every `w_i` moves one step
-(up if `outcome != neg_i`, else down), saturating at −8 and +7 (|sum| <= 4 × 15 + 6 + 9 + 3 = 78: an 8-bit sum). Then the threshold adapts: on a wrong prediction
+(up if `outcome != neg_i`, else down), saturating at −8 and +7 (|sum| <= 4 × 15 + 6 + 12 + 4 = 82: an 8-bit sum). Then the threshold adapts: on a wrong prediction
 the adaptation counter goes up, and when it is at +7 it returns to 0 and θ goes up by one (to at most 63); on a right
 prediction with `|sum| <= theta` it goes down, and at −8 it returns to 0 and θ goes down by one (to at least 1). The
 reference tables train as above. The speculative path history is repaired with the outcome history (FR-04).

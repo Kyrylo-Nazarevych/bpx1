@@ -29,8 +29,8 @@ module bpx_core #(
     parameter HL  = 21,
     parameter PL  = 8,
     parameter UBW = 2,
-    parameter UGW = 3,
-    parameter UTW = 3,
+    parameter UGW = 4,
+    parameter UTW = 4,
     parameter SK  = 0,
     parameter THETA = 10,
     parameter SB  = 8,
@@ -57,7 +57,7 @@ module bpx_core #(
     input  wire [15:0]  reg_wdata,
     output reg  [15:0]  reg_rdata
 );
-  localparam SW = CB * NT + 6;      // staging register width
+  localparam SW = CB * NT + 14;     // staging register width (the top 8 bits: the twin word, docs/mosaic.md 7.3)
   localparam QW = W + 5;            // queue entry: {pdrv, trn, gsh, bim, def, id}
   localparam [STATW-1:0] SMAX = {STATW{1'b1}};
 
@@ -68,6 +68,10 @@ module bpx_core #(
   reg  [2:0] feat;                  // default predictor: {adaptive threshold, negation by history, reference inputs}
   reg        srst;                  // soft reset, one cycle
   wire       irst = rst | srst;
+  // mosaic (docs/mosaic.md 7.2): FCTL switches the experiments (0 = the plain chip); FSTAT holds sticky fault flags
+  reg  [15:0] fctl;                 // [0] TWIN_EN [1] TWIN_USE [3:2] CODE [4] RESTORE [14] DBGF; the rest storage only
+  reg  [3:0]  fstat;                // [0] TW_ERR [1] TW_COR [2] TW_DET [3] TW_SDC
+  reg         lpw;                  // fault event 10: the default prediction of the last predict computed with W3
   reg        init_pend, clrp_pend, snap_pend, snap_q, sclr_pend, sclr_q;
 
   // ---------------------------------------------------------------- state
@@ -113,9 +117,12 @@ module bpx_core #(
   wire [3:0]    tc_q;
   wire [7:0]    theta_q;
   wire          train, tk, clr_exec, dwr_tab, misc_we;
+  wire [3:0]    tw_flags;
+  wire          p_def3;
 
   bpx_pred #(.W(W), .LGB(LGB), .LGG(LGG), .HG(HG), .NT(NT), .LGT(LGT), .CB(CB), .LV(LV), .HL(HL), .PL(PL), .UBW(UBW), .UGW(UGW), .UTW(UTW), .SK(SK), .THETA(THETA), .SB(SB)) u_pred (
-      .clk(clk), .rst(irst), .feat(feat), .wcap(wcap), .wact(wact), .wpulse(wpulse),
+      .clk(clk), .rst(irst), .feat(feat), .tctl(fctl[4:0]), .tw_flags(tw_flags), .p_def3(p_def3),
+      .wcap(wcap), .wact(wact), .wpulse(wpulse),
       .rsel(rsel), .id_p(id_d), .hist_p(sh), .path_p(psh), .id_c(h_id), .hist_c(ch), .path_c(pch),
       .dbg_tab(dspace), .dbg_addr(da), .dbg_rdata(t_rdata),
       .p_def(p_def), .p_bim(p_bim), .p_gsh(p_gsh), .p_trn(p_trn), .conf(p_conf), .look(look),
@@ -225,6 +232,8 @@ module bpx_core #(
       5'h0e:   reg_rdata = sn4[31:16];
       5'h0f:   reg_rdata = {dinc, 1'b0, dwm, dspace, 1'b0, da};
       5'h10:   reg_rdata = {4'd0, dq};
+      5'h11:   reg_rdata = fctl;
+      5'h12:   reg_rdata = {12'd0, fstat};
       default: reg_rdata = 16'd0;
     endcase
   end
@@ -234,11 +243,16 @@ module bpx_core #(
   wire w_da   = reg_we & (reg_addr == 6'h0f);
   wire w_dd   = reg_we & (reg_addr == 6'h10);
   wire r_dd   = reg_re & (reg_addr == 6'h10);
+  wire w_fctl = reg_we & (reg_addr == 6'h11);
 
   // debug events
   wire [3:0]  lp_n = p_exec ? preds : lp;        // so that the DBG pins change together with ACK, like PRED
   wire [15:0] evt = {do_stage, reg_we | reg_re, lp_n[3], lp_n[2], lp_n[1], lp_n[0], q_empty, stg_v, wact,
                      p_refuse | r_empty | (seen & ~pending & ready), fl_exec, r_misp, r_exec, p_exec, pending & ~seen, 1'b0};
+  // fault events (FCTL[14]): 0-3 the twin flags of the predict being acknowledged, 10 its default prediction with W3
+  wire        lpw_n = p_exec ? p_def3 : lpw;
+  wire [3:0]  tw_ev = tw_flags & {4{p_exec}};
+  wire [15:0] fevt  = {5'd0, lpw_n, 6'd0, tw_ev};
 
   wire [2:0] qcnt_n = (fl_exec | r_misp) ? 3'd0 : qcnt + {2'b00, p_exec} - {2'b00, r_exec};
   wire       err_ev = p_refuse | r_empty | (seen & ~pending & ready);
@@ -251,6 +265,9 @@ module bpx_core #(
       dsel0     <= 4'd10;                           // DBG0: last prediction of the default predictor
       dsel1     <= 4'd13;                           // DBG1: last prediction of the tournament
       feat      <= FEAT;
+      fctl      <= 16'd0;
+      fstat     <= 4'd0;
+      lpw       <= 1'b0;
       init_pend <= 1'b1;
       clrp_pend <= 1'b0;
       snap_pend <= 1'b0;
@@ -314,6 +331,8 @@ module bpx_core #(
         pred <= pdrv;
         conf <= ~drive[2] & p_conf[drive[1:0]];     // CONF qualifies PRED: the confidence of the driving predictor
         lp   <= preds;
+        lpw  <= p_def3;
+        fstat <= fstat | tw_flags;                  // the twin's flags of this lookup (0 unless TWIN_EN)
         if (q_empty) begin                          // the predict lookup is the commit lookup
           stg   <= look;
           stg_v <= 1'b1;
@@ -419,6 +438,12 @@ module bpx_core #(
         dsel1  <= reg_wdata[11:8];
         feat   <= reg_wdata[14:12];         // CTRL[15] (binarised inference, removed) is ignored
       end
+      if (w_fctl) begin
+        fctl <= reg_wdata;
+        // the staged twin word depends on TWIN_EN (masking) and CODE (correction): stage again if they change,
+        // so that a restore-on-use writes what a lookup with the new setting reads (golden model: transaction-exact)
+        if ((reg_wdata[0] != fctl[0]) || (reg_wdata[3:2] != fctl[3:2])) stg_v <= 1'b0;
+      end
       if (w_cmd) begin
         if (reg_wdata[0]) srst <= 1'b1;
         if (reg_wdata[1]) clrp_pend <= 1'b1;
@@ -430,6 +455,7 @@ module bpx_core #(
           mis3    <= {STATW{1'b0}};
           err_cnt <= 8'd0;
           eflags  <= 4'd0;
+          fstat   <= 4'd0;
         end
         if (reg_wdata[3] | reg_wdata[4]) snap_pend <= 1'b1;
         if (reg_wdata[4]) sclr_pend <= 1'b1;
@@ -450,7 +476,7 @@ module bpx_core #(
         drd_pend <= 1'b1;
       end
 
-      dbg <= {evt[dsel1], evt[dsel0]};
+      dbg <= fctl[14] ? {fevt[dsel1], fevt[dsel0]} : {evt[dsel1], evt[dsel0]};
     end
   end
 

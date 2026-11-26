@@ -22,6 +22,54 @@ ERR_RESOLVE_EMPTY, ERR_PREDICT_FULL, ERR_WITHDRAWN = 1, 2, 4
 # CTRL[15] (binarised inference until the mosaic round) is gone: it reads 0 and writes to it are ignored.
 FEAT_REF, FEAT_SX, FEAT_DYN = 1, 2, 4
 FEAT_MASK = 7
+# mosaic experiments (register FCTL, docs/mosaic.md 7.2); FCTL = 0 is the plain chip
+FCTL_TWIN_EN, FCTL_TWIN_USE, FCTL_CODE_SHIFT, FCTL_RESTORE, FCTL_DBGF = 1, 2, 2, 16, 0x4000
+CODE_NONE, CODE_PARITY, CODE_SECDED, CODE_DETECT = 0, 1, 2, 3
+# sticky fault flags (register FSTAT) and fault events 0-3 on the DBG pins
+TW_ERR, TW_COR, TW_DET, TW_SDC = 1, 2, 4, 8
+SPACE_TWIN = 12
+# decode outcomes of one twin read (coverage and tests): see twin_outcome()
+TWO_CLEAN, TWO_COR_DATA, TWO_COR_CHECK, TWO_ABSTAIN, TWO_MISCOR, TWO_SILENT, TWO_MASKED = range(7)
+TWO_NAMES = ["clean", "corrected data bit", "corrected check bit", "detected: abstain", "miscorrected (silent)",
+             "silent wrong weight", "wrong word, right weight"]
+
+
+def tw_check(d: int) -> int:
+    """Check bits of the twin code: c_k = XOR of the three data bits other than d_k (extended Hamming (8,4))."""
+    b = [(d >> k) & 1 for k in range(4)]
+    return sum((b[0] ^ b[1] ^ b[2] ^ b[3] ^ b[k]) << k for k in range(4))
+
+
+def tw_encode(d: int) -> int:
+    """Code word {check[3:0], data[3:0]} of a 4-bit weight (two's complement bits)."""
+    d &= 15
+    return (tw_check(d) << 4) | d
+
+
+def tw_decode(word: int, code: int):
+    """Decode a twin word by CODE: returns (data, abstain, corrected).  0: data as stored; 1: odd parity abstains;
+    2 (SEC-DED): odd parity -> correct the single bit the syndrome names (a check-bit error leaves the data), even
+    parity with a non-zero syndrome abstains; 3: any non-zero syndrome abstains."""
+    d = word & 15
+    syn = tw_check(d) ^ (word >> 4)
+    par = bin(word & 0xFF).count("1") & 1
+    if code == CODE_PARITY:
+        return d, par == 1, False
+    if code == CODE_SECDED:
+        if par:
+            for k in range(4):
+                if syn == 15 ^ (1 << k):
+                    d ^= 1 << k
+            return d, False, True
+        return d, syn != 0, False
+    if code == CODE_DETECT:
+        return d, syn != 0, False
+    return d, False, False
+
+
+def tw_flip_kind(word: int) -> int:
+    """Syndrome weight of a word read back: 0 code word, 1 a check bit, 3 a data bit, 2 or 4 even errors."""
+    return bin(tw_check(word & 15) ^ (word >> 4)).count("1")
 
 
 def fold(v: int, inbits: int, outbits: int) -> int:
@@ -46,8 +94,8 @@ class Config:
     weights: List[Tuple[int, int]] = field(default_factory=lambda: [(32, 0), (32, 8), (32, 9), (32, 20)])
     CB: int = 4                  # weight bits (two's complement)
     UBW: int = 2                # the bimodal counter enters the sum as (2c-3) * UBW   (FEAT_REF)
-    UGW: int = 3                # the gshare counter enters the sum as (2c-3) * UGW    (FEAT_REF)
-    UTW: int = 3                # the tournament prediction enters the sum as +-UTW     (FEAT_REF)
+    UGW: int = 4                # the gshare counter enters the sum as (2c-3) * UGW    (FEAT_REF)
+    UTW: int = 4                # the tournament prediction enters the sum as +-UTW     (FEAT_REF)
     PL: int = 8                       # path history: one identifier bit of each of the last PL branches (0 = none)
     SK: int = 0                  # table i rotates the upper identifier bits by i * SK in its index hash
     THETA: int = 10           # training threshold after a clear
@@ -83,6 +131,8 @@ class _Look:                          # one table lookup for one branch (what th
     p_trn: int = 0
     p_def: int = 0
     conf: List[int] = field(default_factory=list)     # confidence of default, bimodal, gshare, tournament
+    p_def3: int = 0                   # default prediction with W3 (differs from p_def only with TWIN_USE)
+    tw: dict = None                   # the twin's read (TWIN_EN = 1 only): raw, data, abstain, cor, flags, outcome
 
 
 class Bpx1:
@@ -110,6 +160,8 @@ class Bpx1:
         nt = len(c.weights)
         # tables start alternately at 0 and -1 (contributions +1 and -1): the sum starts near zero
         self.wt = [[0 if (i & 1) == (nt & 1) else -1] * e for i, (e, _) in enumerate(c.weights)]
+        # leaky twin of the last weight table (W3L): the code word of each entry's weight; never leaks here
+        self.tw = [tw_encode(self.wt[-1][0])] * c.weights[-1][0]
         self.theta = c.THETA
         self.tc = 0
         self.pch = 0                             # committed path history
@@ -124,6 +176,7 @@ class Bpx1:
         self.n_err = 0
         self.err_flags = 0
         self.stat_ovf = False
+        self.fstat = 0                           # CMD bit 2 also clears the sticky fault flags
 
     def reset(self):
         """Pin reset or soft reset: predictor state, statistics and settings."""
@@ -132,12 +185,54 @@ class Bpx1:
         self.drive = DRV_DEFAULT
         self.frozen = False
         self.feat = self.cfg.FEAT
+        self.dsel = [10, 13]                     # DBG0, DBG1 event selections (CTRL[7:4], CTRL[11:8])
+        self.fctl = 0
+        self.last_preds = [0, 0, 0, 0]
+        self.last_pdef3 = 0                      # fault event 10
+        self.last_twf = 0                        # twin flags of the last executed predict (fault events 0-3)
+        self.last_tw = None                      # the twin's read at the last executed predict (None: TWIN_EN = 0)
+
+    # ------------------------------------------------------------------ mosaic settings
+    @property
+    def twin_en(self):
+        return self.fctl & FCTL_TWIN_EN != 0
+
+    @property
+    def twin_use(self):
+        return self.fctl & (FCTL_TWIN_EN | FCTL_TWIN_USE) == (FCTL_TWIN_EN | FCTL_TWIN_USE)
+
+    @property
+    def code(self):
+        return (self.fctl >> FCTL_CODE_SHIFT) & 3
+
+    def write_fctl(self, value: int):
+        self.fctl = value & 0xFFFF
+
+    def twin_outcome(self, raw: int, w3: int):
+        """What the decoder makes of a twin word against W3's weight w3 (4-bit pattern) under the present CODE:
+        (data, abstain, corrected, flags, outcome)."""
+        d, ab, cor = tw_decode(raw, self.code)
+        flags = (TW_ERR if raw != tw_encode(w3) else 0) | (TW_COR if cor else 0) | (TW_DET if ab else 0) | \
+                (TW_SDC if not ab and d != w3 else 0)
+        if raw == tw_encode(w3):
+            o = TWO_CLEAN
+        elif ab:
+            o = TWO_ABSTAIN
+        elif cor:
+            o = (TWO_COR_DATA if tw_flip_kind(raw) == 3 else TWO_COR_CHECK) if d == w3 else TWO_MISCOR
+        elif d != w3:
+            o = TWO_SILENT
+        else:
+            o = TWO_MASKED
+        return d, ab, cor, flags, o
 
     # ------------------------------------------------------------------ lookup (pure function of state)
     def pbit(self, ident: int) -> int:
         return (ident ^ (ident >> 3)) & 1
 
-    def _lookup(self, ident: int, hist: int, phist: int = 0) -> _Look:
+    def _lookup(self, ident: int, hist: int, phist: int = 0, twin: bool = False) -> _Look:
+        """One lookup.  twin = True for a predict: the twin is read (TWIN_EN), and with TWIN_USE its decoded weight
+        replaces W3's in the sum (an abstaining twin leaves the term out).  Training lookups use the static tables."""
         c = self.cfg
         L = _Look()
         ident &= (1 << c.W) - 1
@@ -168,6 +263,16 @@ class Bpx1:
             s += -(2 * w + 1) if neg else 2 * w + 1
         if self.feat & FEAT_REF:
             s += c.UBW * (2 * bim - 3) + c.UGW * (2 * gsh - 3) + (c.UTW if L.p_trn else -c.UTW)
+        L.p_def3 = 1 if s >= 0 else 0
+        if twin and self.twin_en:
+            w3 = self.wt[-1][L.idx[-1]]
+            raw = self.tw[L.idx[-1]]
+            d, ab, cor, flags, o = self.twin_outcome(raw, w3 & ((1 << c.CB) - 1))
+            L.tw = dict(raw=raw, data=d, abstain=ab, cor=cor, flags=flags, outcome=o)
+            if self.twin_use:
+                wd = d - 16 if d & 8 else d
+                t3, td = 2 * w3 + 1, (0 if ab else 2 * wd + 1)
+                s += (td - t3) * (-1 if L.neg[-1] else 1)
         L.s = s
         L.p_def = 1 if s >= 0 else 0
         L.conf = [1 if abs(s) > self.theta else 0, 1 if bim in (0, 3) else 0, 1 if gsh in (0, 3) else 0,
@@ -185,6 +290,8 @@ class Bpx1:
         miss = L.p_def != taken
         low = abs(L.s) <= self.theta
         tr = dict(miss=miss, low=low, s=L.s, neg=sum(L.neg), sat_hi=0, sat_lo=0, th=0)
+        tr["restore"] = -1
+        i3 = L.idx[-1]
         if miss or low:                           # perceptron rule: learn from a miss or from a low margin
             for i in range(len(c.weights)):
                 t = self.wt[i]
@@ -195,6 +302,15 @@ class Bpx1:
                 else:
                     tr["sat_lo"] += w == self.wmin
                     t[L.idx[i]] = max(w - 1, self.wmin)
+            self.tw[i3] = tw_encode(self.wt[-1][i3])     # the twin is written with W3, whatever FCTL says
+        elif self.twin_en and self.fctl & FCTL_RESTORE:
+            # restore-on-use: rewrite the twin entry with the word read at the commit lookup, corrected if SEC-DED
+            # corrected it (odd parity), otherwise as read
+            raw = self.tw[i3]
+            d, ab, cor = tw_decode(raw, self.code)
+            new = tw_encode(d) if cor else raw
+            tr["restore"] = 0 if raw == tw_encode(self.wt[-1][i3]) else 1 if cor else 2
+            self.tw[i3] = new
         if self.feat & FEAT_DYN:                  # adaptive threshold: balance misses against low-margin hits
             if miss:
                 if self.tc == self.tcmax:
@@ -233,11 +349,15 @@ class Bpx1:
             rep.refused |= bit
 
     def _do_predict(self, ident, rep):
-        L = self._lookup(ident, self.sh, self.psh)
+        L = self._lookup(ident, self.sh, self.psh, twin=True)
         preds = [L.p_def, L.p_bim, L.p_gsh, L.p_trn]
         pdrv = 0 if self.drive == DRV_NOT_TAKEN else preds[self.drive]
         self.queue.append(dict(id=ident & ((1 << self.cfg.W) - 1), preds=preds, pdrv=pdrv))
         self.last_preds = preds                    # on the pins: DBG0, PBIM, PGSH, DBG1 after reset
+        self.last_pdef3 = L.p_def3
+        self.last_tw = L.tw
+        self.last_twf = L.tw["flags"] if L.tw else 0
+        self.fstat |= self.last_twf
         self.sh = ((self.sh << 1) | pdrv) & self._hmask()
         self.psh = ((self.psh << 1) | self.pbit(ident)) & self._pmask()
         rep.pred = pdrv
@@ -303,13 +423,28 @@ class Bpx1:
     def flush(self):
         return self.request(OP_SPECIAL, SUB_FLUSH)
 
-    def ctrl_word(self, dbg0=10, dbg1=13):
-        """The CTRL register for the present settings (DBG selections as after reset)."""
-        return self.drive | (8 if self.frozen else 0) | (dbg0 << 4) | (dbg1 << 8) | ((self.feat & FEAT_MASK) << 12)
+    def ctrl_word(self):
+        """The CTRL register for the present settings."""
+        return self.drive | (8 if self.frozen else 0) | (self.dsel[0] << 4) | (self.dsel[1] << 8) | ((self.feat & FEAT_MASK) << 12)
 
     def write_ctrl(self, value: int):
-        """A write of CTRL as the chip takes it (DBG selections are not modelled; CTRL[15] is ignored)."""
+        """A write of CTRL as the chip takes it (CTRL[15] is ignored)."""
         self.drive, self.frozen, self.feat = value & 7, bool(value & 8), (value >> 12) & FEAT_MASK
+        self.dsel = [(value >> 4) & 15, (value >> 8) & 15]
+
+    def dbg_event(self, k: int):
+        """Value of DBG event k as the pins show it together with the ACK of an accepted predict: the fault events
+        (FCTL[14] = 1: 0-3 the twin flags of that predict, 10 its default prediction with W3, the others 0), or the
+        standard events 10-13 (the four predictions); None for a standard event the model does not track."""
+        if self.fctl & FCTL_DBGF:
+            if k < 4:
+                return (self.last_twf >> k) & 1
+            return self.last_pdef3 if k == 10 else 0
+        return self.last_preds[k - 10] if 10 <= k <= 13 else None
+
+    def dbg_pins(self):
+        """(DBG0, DBG1) with the ACK of the last accepted predict."""
+        return self.dbg_event(self.dsel[0]), self.dbg_event(self.dsel[1])
 
     # ------------------------------------------------------------------ observation
     def stats(self):
@@ -320,7 +455,7 @@ class Bpx1:
         """Every bit of predictor state (FR-10), in a canonical form the testbench compares with the chip."""
         return dict(bim=list(self.bim), cho=list(self.cho), gsh=list(self.gsh), weights=[list(t) for t in self.wt],
                     theta=self.theta, tc=self.tc, ch=self.ch, sh=self.sh, pch=self.pch, psh=self.psh, queue=[dict(q) for q in self.queue],
-                    drive=self.drive, frozen=self.frozen, feat=self.feat)
+                    drive=self.drive, frozen=self.frozen, feat=self.feat, twin=list(self.tw), fctl=self.fctl, fstat=self.fstat)
 
     def raw(self, space: int, addr: int) -> int:
         """The word the control port's raw access reads at (space, addr) (docs/SPEC.md section 4)."""
@@ -332,6 +467,8 @@ class Bpx1:
         if space == 7:
             return [self.ch & 0xfff, self.ch >> 12, self.sh & 0xfff, self.sh >> 12, (self.tc & 0xf) | (self.theta << 4),
                     self.pch & 0xfff, self.pch >> 12, self.psh & 0xfff, self.psh >> 12][addr]
+        if space == SPACE_TWIN:                   # the twin's 8 bits, read as 0 unless TWIN_EN
+            return self.tw[addr] if self.twin_en else 0
         return self.wt[space - 8][addr] & ((1 << c.CB) - 1)
 
     def raw_write(self, space: int, addr: int, value: int, mask: int = 3):
@@ -348,6 +485,9 @@ class Bpx1:
             if addr == 4:
                 self.tc = (value & 0xf) - (16 if value & 8 else 0)
                 self.theta = (value >> 4) & 0x3f
+        elif space == SPACE_TWIN:                 # whatever FCTL says; a write of W3 (space 11) leaves the twin
+            if mask & 1:
+                self.tw[addr] = value & 0xFF
         else:
             v = value & ((1 << c.CB) - 1)
             self.wt[space - 8][addr] = v - (1 << c.CB if v >> (c.CB - 1) else 0)
