@@ -15,6 +15,7 @@
 // Build: g++ -O2 -std=c++17 -pthread -o bpsim bpsim.cc
 // Use:   bpsim <configs.txt> <out.tsv> <trace.evt>...   (options as leading key=value: W=10 R=1 rf=0 threads=8)
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -73,6 +74,8 @@ static inline void sat(uint8_t& c, bool up, int mx) { if (up) { if (c < mx) c++;
 struct Params {
     map<string, string> kv;
     int geti(const string& k, int d) const { auto it = kv.find(k); return it == kv.end() ? d : atoi(it->second.c_str()); }
+    double getd(const string& k, double d) const { auto it = kv.find(k); return it == kv.end() ? d : atof(it->second.c_str()); }
+    string gets(const string& k, const string& d = "") const { auto it = kv.find(k); return it == kv.end() ? d : it->second; }
     vector<int> getl(const string& k) const {
         vector<int> v; auto it = kv.find(k); if (it == kv.end()) return v;
         stringstream ss(it->second); string s;
@@ -98,6 +101,103 @@ struct Pred {
     virtual bool predict(const Ctx&) = 0;
     virtual void train(const Ctx&, bool taken) = 0;
     virtual Cost cost() = 0;
+    // predict and let the predictor count its own observations against the outcome (fault campaign); returns the
+    // driving prediction.  report(): those counts as text for the TSV.
+    virtual bool predict_count(const Ctx& c, bool) { return predict(c); }
+    virtual string report() { return ""; }
+};
+
+// ---------------------------------------------------------------------------------------------- fault campaign helpers
+// docs/fault_campaign.md.  Random numbers: splitmix64 (seeded per run from the seed, the program and the scenario).
+struct Rng {
+    u64 s;
+    explicit Rng(u64 seed = 1) : s(seed) {}
+    u64 next() { u64 z = (s += 0x9E3779B97F4A7C15ull); z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; z = (z ^ (z >> 27)) * 0x94D049BB133111EBull; return z ^ (z >> 31); }
+    double uni() { return ((double)(next() >> 11) + 0.5) * (1.0 / 9007199254740992.0); }   // in (0, 1)
+    double expo(double mean) { return -mean * log(uni()); }
+    double norm() { double a = uni(), b = uni(); return sqrt(-2.0 * log(a)) * cos(6.283185307179586 * b); }
+    u32 below(u32 n) { return (u32)(next() % n); }
+};
+static u64 hash_str(const string& s) { u64 h = 1469598103934665603ull; for (char ch : s) { h ^= (uint8_t)ch; h *= 1099511628211ull; } return h; }
+static u64 mix(u64 a, u64 b) { Rng r(a ^ (b * 0x9E3779B97F4A7C15ull)); return r.next(); }
+
+// The twin's code (docs/mosaic.md 7.3, model/bpx1.py tw_*): word = {check[3:0], data[3:0]}, c_k = XOR of the data
+// bits other than d_k (extended Hamming (8,4)).  Decode by CODE: 0 none, 1 parity -> abstain, 2 SEC-DED, 3 detect all.
+static inline int tw_check(int d) { int p = (d ^ (d >> 1) ^ (d >> 2) ^ (d >> 3)) & 1, r = 0; for (int k = 0; k < 4; k++) r |= (p ^ ((d >> k) & 1)) << k; return r; }
+static inline int tw_encode(int d) { d &= 15; return (tw_check(d) << 4) | d; }
+static inline void tw_decode(int word, int code, int& d, bool& ab, bool& cor) {
+    d = word & 15; ab = false; cor = false;
+    int syn = tw_check(d) ^ (word >> 4), par = __builtin_popcount((unsigned)word & 0xFF) & 1;
+    if (code == 1) ab = par;
+    else if (code == 2) {
+        if (par) { for (int k = 0; k < 4; k++) if (syn == (15 ^ (1 << k))) d ^= 1 << k; cor = true; }
+        else ab = syn != 0;
+    } else if (code == 3) ab = syn != 0;
+}
+
+// Fault targets: the chip's tables as the model's raw spaces see them (bimodal and chooser are one raw word).
+enum { TG_BIM, TG_CHO, TG_GSH, TG_W0, TG_W1, TG_W2, TG_W3, TG_TW, TG_N };
+static const char* TG_NAME[TG_N] = {"bim", "cho", "gsh", "w0", "w1", "w2", "w3", "tw"};
+struct Flip { u64 k; int tab, e, b; };    // applied just before resolve number k (1-based), in every instance
+
+// One decay (or flip) scenario of the leaky twin, with its three physical copies: 0 RESTORE off (every CODE reads
+// the same words), 1 RESTORE on with CODE 0, 1, 3 (restore writes the word as read), 2 RESTORE on with CODE 2
+// (restore writes the corrected word).  Every copy is written with W3's code word whenever W3 trains.
+// Decay: from its last write each bit keeps its value for a lifetime L (in resolved branches) and then reads as the
+// cell's preferred level; a read at time t (resolves started) sees the decayed level if t >= t_write + ceil(L).
+static const u32 NEVER = 0xFFFFFFFFu;
+struct TwinScen {
+    int kind = 0;                 // 0 no decay (flips only), 1 exponential lifetime drawn at every write, 2 per-cell fixed log-normal lifetime
+    double tau = 0; int prefmode = 0;
+    string spec;
+    uint8_t pref[32] = {};        // preferred level, bit b of entry e
+    u32 life[32][8] = {};
+    struct Store { uint8_t w[32]; u32 D[32][8]; u32 dmin[32]; Rng rng; };
+    Store st[3];
+    u64 mis[4][2] = {}, ev[4][2][4] = {};   // per CODE x RESTORE: mispredictions of the twin-using default; TW_ERR, TW_COR, TW_DET, TW_SDC
+    vector<array<u64, 4>> log;    // effective decay events of one copy (validation): resolve index, entry, bit, level
+    int logst = -1;
+    bool parse(const string& s, double sig, u64 seed) {
+        spec = s;
+        if (s == "x") kind = 0;
+        else {
+            if (s[0] == 'e') kind = 1; else if (s[0] == 'l') kind = 2; else return false;
+            size_t p = s.find('p'); if (p == string::npos) return false;
+            tau = atof(s.substr(1, p - 1).c_str()); char m = s[p + 1];
+            prefmode = m == '0' ? 0 : m == '1' ? 1 : m == 'm' ? 2 : -1;
+            if (tau <= 0 || prefmode < 0) return false;
+        }
+        Rng r(mix(seed, hash_str(s)));      // per-cell properties: the same "chip" for every program
+        for (int e = 0; e < 32; e++) {
+            pref[e] = prefmode == 0 ? 0 : prefmode == 1 ? 0xFF : (uint8_t)(r.next() & 0xFF);
+            for (int b = 0; b < 8; b++) { double L = tau * exp(sig * r.norm()); life[e][b] = L >= 4e9 ? NEVER - 1 : (u32)max(1.0, ceil(L)); }
+        }
+        return true;
+    }
+    inline int read(int si, int e, u64 now) const {
+        const Store& s = st[si]; int w = s.w[e];
+        if (kind && now >= s.dmin[e])
+            for (int b = 0; b < 8; b++) if (now >= s.D[e][b]) w = (w & ~(1 << b)) | (((pref[e] >> b) & 1) << b);
+        return w;
+    }
+    void logdecays(int si, int e, u64 now) {
+        Store& s = st[si];
+        for (int b = 0; b < 8; b++) if (s.D[e][b] <= now) log.push_back({(u64)s.D[e][b], (u64)e, (u64)b, (u64)((pref[e] >> b) & 1)});
+    }
+    void write(int si, int e, int val, u64 now) {
+        Store& s = st[si];
+        if (kind && si == logst) logdecays(si, e, now);
+        s.w[e] = (uint8_t)val; s.dmin[e] = NEVER;
+        if (!kind) return;
+        for (int b = 0; b < 8; b++) {
+            u32 D = NEVER;
+            if (((val >> b) & 1) != ((pref[e] >> b) & 1)) {
+                double L = kind == 1 ? max(1.0, ceil(s.rng.expo(tau))) : (double)life[e][b];
+                double t = (double)now + L; D = t >= 4e9 ? NEVER - 1 : (u32)t;
+            }
+            s.D[e][b] = D; s.dmin[e] = min(s.dmin[e], D);
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------------------------- simple predictors
@@ -356,9 +456,33 @@ struct OgehlP : Pred {
 //   bin      binarised inference: the prediction is the majority of the weights' signs; training is unchanged
 //   un       area only: weights stored in unary (thermometer) code, summed by a population count
 // The weights train on a misprediction or when |sum| <= theta; the references train by their own rules.
+//
+// Fault campaign (docs/fault_campaign.md); everything below is off unless named on the configuration line:
+//   fi_tgt, fi_rate, fi_seed   Poisson bit flips (rate per resolved branch) into one table: bim cho gsh w0..w3 tw
+//   flist=<file>               an explicit flip list, lines "k table entry bit" (table 0..7 as above), applied just
+//                              before resolve k (1-based) in every instance
+//   tws=<s>,<s>...             leaky-twin scenarios, each with its three copies and all CODE x RESTORE modes counted
+//                              in the shadow of the static predictor (the twin never changes training): x = no decay
+//                              (flips with table tw go to these), e<tau>p<0|1|m> = exponential lifetime of mean tau
+//                              drawn at every write, l<tau>p<0|1|m> = per-cell fixed log-normal lifetime (median tau,
+//                              sigma dsig, default 0.5); preferred level 0, 1 or mixed (per cell, drawn once); dseed
+//   twuse=1 code= rest=        the driving default prediction takes the twin of scenario 0 in that mode (TWIN_USE)
+//   dlog=<file>                the effective decay events of that copy, sequential instance (validation)
+//   lt=1                       fault lifetime: the fault-free predictor runs in lockstep; per flip, resolves until the
+//                              flipped entry, and until the whole state, equal the fault-free ones again
 struct GehlRP : Pred {
     Tourn base; int nt, ent[8], lg[8], hl[8], cb, cmax, W, ub, ug, ut, theta, dyn, tc = 0, tcm, sx, sk, thmin, thmax, ini, pr, pp, un, bin; u32 lfsr = 0xACE1u;
     vector<int8_t> T[8];
+    u64 now = 0;                                    // resolves started (the time unit of the campaign)
+    vector<Flip> flips; size_t fcur = 0; u64 nflip[TG_N] = {};
+    vector<TwinScen> tws; int twuse = 0, tcode = 0, trest = 0; string dlog;
+    u64 m4[4] = {}, mab = 0;                        // mispredictions: default, bimodal, gshare, tournament; default with W3 left out
+    unique_ptr<GehlRP> gold;
+    struct Pend { u64 k; int tab, e; bool erec; };
+    vector<Pend> pend; u64 lt_n = 0, lt_erec = 0, lt_esum = 0, lt_grec = 0, lt_gsum = 0;
+    static int store(int code, int rest) { return rest == 0 ? 0 : code == 2 ? 2 : 1; }
+    int tsize(int t) const { return t == TG_BIM ? base.b.n : t == TG_CHO ? base.cn : t == TG_GSH ? base.g.n : t == TG_TW ? ent[nt - 1] : ent[t - TG_W0]; }
+    int tbits(int t) const { return t <= TG_GSH ? 2 : t == TG_TW ? 8 : cb; }
     GehlRP(const Params& p) {
         base.init(p.geti("bn", 64), p.geti("gn", 128), p.geti("gh", 4), p.geti("cn", 64), 0, -1, 0);
         vector<int> te = p.getl("te"), th = p.getl("th");
@@ -370,6 +494,75 @@ struct GehlRP : Pred {
         for (int i = 0; i < nt; i++) {
             ent[i] = te[i < (int)te.size() ? i : te.size() - 1]; lg[i] = ilog2(ent[i]); hl[i] = th[i];
             T[i].assign(ent[i], (int8_t)((ini && (i & 1) == (nt & 1)) ? 0 : (ini ? -1 : 0)));   // alternate +1 / -1: the sum starts near zero, leaning not-taken
+        }
+        setup_faults(p);
+    }
+    void setup_faults(const Params& p) {
+        u64 N = (u64)p.geti("_n", 0), ph = hash_str(p.gets("_prog"));
+        double rate = p.getd("fi_rate", 0);
+        if (rate > 0) {
+            string tg = p.gets("fi_tgt"); int t = -1;
+            for (int i = 0; i < TG_N; i++) if (tg == TG_NAME[i]) t = i;
+            if (t < 0 || (t >= TG_W0 && t < TG_TW && t - TG_W0 >= nt)) { fprintf(stderr, "unknown fi_tgt %s\n", tg.c_str()); exit(2); }
+            Rng r(mix(mix((u64)p.geti("fi_seed", 1), ph), hash_str(tg) ^ (u64)llround(rate * 1e12)));
+            for (double x = r.expo(1.0 / rate); x < (double)N; x += r.expo(1.0 / rate))
+                flips.push_back({(u64)x + 1, t, (int)r.below(tsize(t)), (int)r.below(tbits(t))});
+        }
+        string fl = p.gets("flist");
+        if (!fl.empty()) {
+            FILE* f = fopen(fl.c_str(), "r"); if (!f) { fprintf(stderr, "cannot open %s\n", fl.c_str()); exit(1); }
+            unsigned long long k; int t, e, b;
+            while (fscanf(f, "%llu %d %d %d", &k, &t, &e, &b) == 4) {
+                if (t < 0 || t >= TG_N || e < 0 || e >= tsize(t) || b < 0 || b >= tbits(t)) { fprintf(stderr, "bad flip %llu %d %d %d\n", k, t, e, b); exit(2); }
+                flips.push_back({(u64)k, t, e, b});
+            }
+            fclose(f);
+            stable_sort(flips.begin(), flips.end(), [](const Flip& x, const Flip& y) { return x.k < y.k; });
+        }
+        string ts = p.gets("tws"); u64 dseed = (u64)p.geti("dseed", 1);
+        for (size_t a = 0; a < ts.size();) {
+            size_t z = ts.find(',', a); if (z == string::npos) z = ts.size();
+            TwinScen sc;
+            if (!sc.parse(ts.substr(a, z - a), p.getd("dsig", 0.5), dseed)) { fprintf(stderr, "bad twin scenario %s\n", ts.substr(a, z - a).c_str()); exit(2); }
+            tws.push_back(sc); a = z + 1;
+        }
+        for (TwinScen& sc : tws)
+            for (int si = 0; si < 3; si++) {
+                sc.st[si].rng = Rng(mix(mix(dseed, ph), hash_str(sc.spec)));    // the same draws for the three copies while they agree
+                for (int e = 0; e < ent[nt - 1]; e++) sc.write(si, e, tw_encode(T[nt - 1][e]), 0);
+            }
+        for (const Flip& f : flips) if (f.tab == TG_TW && none_of(tws.begin(), tws.end(), [](const TwinScen& s) { return s.kind == 0; })) { fprintf(stderr, "twin flips need a twin scenario x\n"); exit(2); }
+        twuse = p.geti("twuse", 0); tcode = p.geti("code", 0); trest = p.geti("rest", 0);
+        if (twuse && tws.empty()) { fprintf(stderr, "twuse needs tws\n"); exit(2); }
+        dlog = p.gets("dlog");
+        if (!dlog.empty() && p.gets("_inst") == "s" && !tws.empty()) tws[0].logst = store(tcode, trest);
+        if (p.geti("lt", 0)) {
+            Params q = p;
+            for (const char* k : {"fi_rate", "flist", "tws", "lt", "twuse", "dlog"}) q.kv.erase(k);
+            gold.reset(new GehlRP(q));
+        }
+    }
+    int val(int t, int e) const { return t == TG_BIM ? base.b.t[e] : t == TG_CHO ? base.ch[e] : t == TG_GSH ? base.g.t[e] : T[t - TG_W0][e]; }
+    bool same_state(const GehlRP& o) const {
+        for (int i = 0; i < nt; i++) if (T[i] != o.T[i]) return false;
+        return base.b.t == o.base.b.t && base.g.t == o.base.g.t && base.ch == o.base.ch && theta == o.theta && tc == o.tc && lfsr == o.lfsr;
+    }
+    void apply(const Flip& f) {
+        nflip[f.tab]++;
+        if (f.tab == TG_BIM) base.b.t[f.e] ^= (uint8_t)(1 << f.b);
+        else if (f.tab == TG_CHO) base.ch[f.e] ^= (uint8_t)(1 << f.b);
+        else if (f.tab == TG_GSH) base.g.t[f.e] ^= (uint8_t)(1 << f.b);
+        else if (f.tab == TG_TW) { for (TwinScen& sc : tws) if (!sc.kind) for (int si = 0; si < 3; si++) sc.st[si].w[f.e] ^= (uint8_t)(1 << f.b); }
+        else { int8_t& v = T[f.tab - TG_W0][f.e]; int u = (v & (int)mask32(cb)) ^ (1 << f.b); v = (int8_t)((u >> (cb - 1)) ? u - (1 << cb) : u); }
+        if (gold && f.tab != TG_TW) { lt_n++; pend.push_back({now, f.tab, f.e, false}); }
+    }
+    void track() {
+        if (pend.empty()) return;
+        bool all = same_state(*gold);
+        for (size_t i = 0; i < pend.size();) {
+            Pend& q = pend[i];
+            if (!q.erec && val(q.tab, q.e) == gold->val(q.tab, q.e)) { q.erec = true; lt_erec++; lt_esum += now - q.k + 1; }
+            if (all) { lt_grec++; lt_gsum += now - q.k + 1; pend.erase(pend.begin() + i); } else i++;
         }
     }
     inline int idx(int i, const Ctx& c) const {
@@ -391,9 +584,37 @@ struct GehlRP : Pred {
         return s;
     }
     bool predict(const Ctx& c) override { return sum(c, bin) >= 0; }
+    // The chip's four predictions from one state (the reference tables are shared, docs/SPEC.md), the default with W3
+    // left out, and every twin scenario x CODE x RESTORE as the chip would predict with TWIN_EN = TWIN_USE = 1 (the
+    // twin is read at the same index as W3; an abstaining word leaves the term out).  Flags as the chip's FSTAT.
+    bool predict_count(const Ctx& c, bool tk) override {
+        int s = sum(c, bin); bool pd = s >= 0, drv = pd;
+        m4[0] += pd != tk; m4[1] += base.b.pred(c) != tk; m4[2] += base.g.pred(c) != tk; m4[3] += base.pred(c) != tk;
+        int i3 = nt - 1, e3 = idx(i3, c), sg = neg(i3, c) ? -1 : 1, w3 = T[i3][e3], t3 = sg * (2 * w3 + 1), cw = tw_encode(w3), p3 = w3 & 15;
+        mab += (s - t3 >= 0) != tk;
+        for (size_t j = 0; j < tws.size(); j++) {
+            TwinScen& sc = tws[j];
+            int raw[3] = {sc.read(0, e3, now), sc.read(1, e3, now), sc.read(2, e3, now)};
+            for (int code = 0; code < 4; code++)
+                for (int rest = 0; rest < 2; rest++) {
+                    int rw = raw[store(code, rest)], d; bool ab, cor;
+                    tw_decode(rw, code, d, ab, cor);
+                    int wd = d >= 8 ? d - 16 : d;
+                    bool p = s - t3 + (ab ? 0 : sg * (2 * wd + 1)) >= 0;
+                    sc.mis[code][rest] += p != tk;
+                    u64* ev = sc.ev[code][rest];
+                    ev[0] += rw != cw; ev[1] += cor; ev[2] += ab; ev[3] += !ab && d != p3;
+                    if (j == 0 && twuse && code == tcode && rest == trest) drv = p;
+                }
+        }
+        return drv;
+    }
     void train(const Ctx& c, bool tk) override {
-        int s = sum(c); bool pr = (bin ? sum(c, true) : s) >= 0, low = abs(s) <= theta;
-        if (pr != tk || low)
+        now++;
+        while (fcur < flips.size() && flips[fcur].k <= now) apply(flips[fcur++]);
+        int s = sum(c); bool pd = (bin ? sum(c, true) : s) >= 0, low = abs(s) <= theta, w3w = false;
+        int e3 = idx(nt - 1, c);
+        if (pd != tk || low)
         {
             if (this->pr) lfsr = (lfsr >> 1) ^ ((lfsr & 1) ? 0xB400u : 0);
             int half = (cmax + 1) / 2;
@@ -402,12 +623,54 @@ struct GehlRP : Pred {
                 if (this->pr && ((up && v >= half) || (!up && v < -half)) && !((lfsr >> i) & 1)) continue;
                 if (up) { if (v < cmax) v++; } else { if (v > -cmax - 1) v--; }
             }
+            w3w = true;
         }
         if (dyn) {
-            if (pr != tk) { if (++tc > tcm) { tc = 0; if (theta < thmax) theta++; } }
+            if (pd != tk) { if (++tc > tcm) { tc = 0; if (theta < thmax) theta++; } }
             else if (low) { if (--tc < -tcm - 1) { tc = 0; if (theta > thmin) theta--; } }
         }
         base.upd(c, tk);
+        // the twin: written with W3 whenever W3 trains; otherwise restore-on-use rewrites the word read now (copy 1
+        // as read, copy 2 corrected if SEC-DED corrected it)
+        for (TwinScen& sc : tws) {
+            if (w3w) { int w = tw_encode(T[nt - 1][e3]); for (int si = 0; si < 3; si++) sc.write(si, e3, w, now); }
+            else {
+                sc.write(1, e3, sc.read(1, e3, now), now);
+                int r2 = sc.read(2, e3, now), d; bool ab, cor;
+                tw_decode(r2, 2, d, ab, cor);
+                sc.write(2, e3, cor ? tw_encode(d) : r2, now);
+            }
+        }
+        if (gold) { gold->train(c, tk); track(); }
+    }
+    string report() override {
+        char b[256]; string o;
+        u64 nf = 0; for (int t = 0; t < TG_TW; t++) nf += nflip[t];
+        snprintf(b, sizeof b, "m4=%llu,%llu,%llu,%llu;ab=%llu;nf=%llu;nftw=%llu;now=%llu", (unsigned long long)m4[0], (unsigned long long)m4[1],
+                 (unsigned long long)m4[2], (unsigned long long)m4[3], (unsigned long long)mab, (unsigned long long)nf, (unsigned long long)nflip[TG_TW], (unsigned long long)now);
+        o += b;
+        for (size_t j = 0; j < tws.size(); j++)
+            for (int code = 0; code < 4; code++)
+                for (int rest = 0; rest < 2; rest++) {
+                    const u64* ev = tws[j].ev[code][rest];
+                    snprintf(b, sizeof b, ";s%zuc%dr%d=%llu,%llu,%llu,%llu,%llu", j, code, rest, (unsigned long long)tws[j].mis[code][rest],
+                             (unsigned long long)ev[0], (unsigned long long)ev[1], (unsigned long long)ev[2], (unsigned long long)ev[3]);
+                    o += b;
+                }
+        if (gold) {
+            u64 cs = 0; for (const Pend& q : pend) cs += now - q.k + 1;
+            snprintf(b, sizeof b, ";lt=%llu,%llu,%llu,%llu,%llu,%zu,%llu", (unsigned long long)lt_n, (unsigned long long)lt_erec, (unsigned long long)lt_esum,
+                     (unsigned long long)lt_grec, (unsigned long long)lt_gsum, pend.size(), (unsigned long long)cs);
+            o += b;
+        }
+        if (!tws.empty() && tws[0].logst >= 0) {
+            TwinScen& sc = tws[0];
+            for (int e = 0; e < ent[nt - 1]; e++) sc.logdecays(sc.logst, e, now);
+            sort(sc.log.begin(), sc.log.end());
+            FILE* f = fopen(dlog.c_str(), "w");
+            if (f) { for (const auto& x : sc.log) fprintf(f, "%llu %llu %llu %llu\n", (unsigned long long)x[0], (unsigned long long)x[1], (unsigned long long)x[2], (unsigned long long)x[3]); fclose(f); }
+        }
+        return o;
     }
     Cost cost() override {
         Cost k; int hm = 0;
@@ -591,13 +854,17 @@ static Pred* make(const string& kind, const Params& p) {
 // The outcome is reported to the chip in the cycle after it resolves; a predict of that same cycle is served before
 // the resolve trains (rf=0) or after it (rf=1).  `cyc` is the cycle in which the current instruction is in ID.
 struct CpuCfg { int R = 1, lu = 1, mul = 0, div = 32, rf = 0, W = 10, hint = 1, btb = 256, seq = 1; };
-struct Res { u64 br = 0, mis_seq = 0, mis_cpu = 0, cyc = 0, snt = 0, ins = 0, btbmiss = 0; };
+struct Res { u64 br = 0, mis_seq = 0, mis_cpu = 0, cyc = 0, snt = 0, ins = 0, btbmiss = 0; string xs, xc; };
 
 static inline u32 fold_id(u32 pc, int W) { return fold((u64)(pc >> 2), 30, W); }
 
 static Res run_trace(const Trace& tr, const string& kind, const Params& p, const CpuCfg& cc) {
     Res res;
-    unique_ptr<Pred> ps(make(kind, p)), pc(make(kind, p));
+    u64 nbr = 0;                         // conditional branches: the length of the fault process
+    for (const Rec& r : tr.r) { u32 k = r.info & 3; if (k == 3) break; if (k == 0) nbr++; }
+    Params pps = p, ppc = p;
+    pps.kv["_n"] = ppc.kv["_n"] = to_string(nbr); pps.kv["_prog"] = ppc.kv["_prog"] = tr.name; pps.kv["_inst"] = "s"; ppc.kv["_inst"] = "c";
+    unique_ptr<Pred> ps(make(kind, pps)), pc(make(kind, ppc));
     struct Pend { u64 when; Ctx c; bool taken; };
     deque<Pend> q;
     vector<u32> btb(cc.btb ? cc.btb : 1, 0xffffffffu);
@@ -620,7 +887,7 @@ static Res run_trace(const Trace& tr, const string& kind, const Params& p, const
             bool taken = (r.info >> 2) & 1;
             Ctx c; c.id = fold_id(r.pc, cc.W); c.bias = cc.hint ? (r.target < r.pc) : false; c.gh = gh; c.same = 0; c.ph = ph;
             if (cc.seq) {                // strictly sequential reference: one branch in flight
-                if (ps->predict(c) != taken) res.mis_seq++;
+                if (ps->predict_count(c, taken) != taken) res.mis_seq++;
                 ps->train(c, taken);
             }
             bool hit = btb_hit(r.pc);
@@ -632,7 +899,7 @@ static Res run_trace(const Trace& tr, const string& kind, const Params& p, const
             u64 tp = hit ? cyc - 1 : cyc;                       // cycle of the predict request
             while (!q.empty() && (cc.rf ? q.front().when <= tp : q.front().when < tp)) { pc->train(q.front().c, q.front().taken); q.pop_front(); }
             for (const Pend& x : q) if (x.c.id == c.id) c.same++;
-            bool pr = pc->predict(c);
+            bool pr = pc->predict_count(c, taken);
             q.push_back({cyc + cc.R + 1, c, taken});            // cycle of the resolve request
             if (pr != taken) { res.mis_cpu++; cyc += 1 + pm; }
             else cyc += 1 + ((taken && !hit) ? 1 : 0);
@@ -644,6 +911,8 @@ static Res run_trace(const Trace& tr, const string& kind, const Params& p, const
         else { cyc += 1 + pm; snt += 1 + pm; }
     }
     res.cyc = cyc; res.snt = snt;
+    if (cc.seq) res.xs = ps->report();
+    res.xc = pc->report();
     return res;
 }
 
@@ -697,13 +966,14 @@ int main(int argc, char** argv) {
     for (auto& t : th) t.join();
     for (size_t i = 0; i < cfgs.size(); i++) { unique_ptr<Pred> p(make(cfgs[i].kind, cfgs[i].p)); costs[i] = p->cost(); }
     FILE* fo = fopen(outpath.c_str(), "w");
-    fprintf(fo, "config\tkind\tbits\tsbits\tarea\tsarea\tprogram\tbranches\tmis_seq\tmis_cpu\tcycles\tsnt_cycles\tinstr\n");
+    fprintf(fo, "config\tkind\tbits\tsbits\tarea\tsarea\tprogram\tbranches\tmis_seq\tmis_cpu\tcycles\tsnt_cycles\tinstr\tx_seq\tx_cpu\n");
     for (size_t i = 0; i < cfgs.size(); i++)
         for (size_t t = 0; t < traces.size(); t++) {
             const Res& r = out[i][t];
-            fprintf(fo, "%s\t%s\t%.0f\t%.0f\t%.0f\t%.0f\t%s\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\n", cfgs[i].name.c_str(), cfgs[i].kind.c_str(),
+            fprintf(fo, "%s\t%s\t%.0f\t%.0f\t%.0f\t%.0f\t%s\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%s\t%s\n", cfgs[i].name.c_str(), cfgs[i].kind.c_str(),
                     costs[i].bits, costs[i].sbits, costs[i].area, costs[i].sarea, traces[t].name.c_str(), (unsigned long long)r.br,
-                    (unsigned long long)r.mis_seq, (unsigned long long)r.mis_cpu, (unsigned long long)r.cyc, (unsigned long long)r.snt, (unsigned long long)r.ins);
+                    (unsigned long long)r.mis_seq, (unsigned long long)r.mis_cpu, (unsigned long long)r.cyc, (unsigned long long)r.snt, (unsigned long long)r.ins,
+                    r.xs.empty() ? "-" : r.xs.c_str(), r.xc.empty() ? "-" : r.xc.c_str());
         }
     fclose(fo);
     fprintf(stderr, "%zu configs x %zu traces done\n", cfgs.size(), traces.size());
