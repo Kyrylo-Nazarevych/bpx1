@@ -149,7 +149,8 @@ static const u32 NEVER = 0xFFFFFFFFu;
 struct TwinScen {
     int kind = 0;                 // 0 no decay (flips only), 1 exponential lifetime drawn at every write, 2 per-cell fixed log-normal lifetime
     double tau = 0; int prefmode = 0;
-    string spec;
+    int mask = 0;                 // coset mask: the nodes hold word XOR mask, decay acts on the nodes, a read XORs the mask back
+    string spec, base;            // base: the spec without the mask suffix (seeds the per-cell draws: the same chip for every mask)
     uint8_t pref[32] = {};        // preferred level, bit b of entry e
     u32 life[32][8] = {};
     struct Store { uint8_t w[32]; u32 D[32][8]; u32 dmin[32]; Rng rng; };
@@ -157,8 +158,16 @@ struct TwinScen {
     u64 mis[4][2] = {}, ev[4][2][4] = {};   // per CODE x RESTORE: mispredictions of the twin-using default; TW_ERR, TW_COR, TW_DET, TW_SDC
     vector<array<u64, 4>> log;    // effective decay events of one copy (validation): resolve index, entry, bit, level
     int logst = -1;
-    bool parse(const string& s, double sig, u64 seed) {
-        spec = s;
+    bool parse(const string& full, double sig, u64 seed) {
+        spec = full;
+        size_t km = full.find('k');
+        string s = full.substr(0, km);
+        if (km != string::npos) {
+            char* end = nullptr; long m = strtol(full.c_str() + km + 1, &end, 16);
+            if (*end || m < 0 || m > 255 || end == full.c_str() + km + 1) return false;
+            mask = (int)m;
+        }
+        base = s;
         if (s == "x") kind = 0;
         else {
             if (s[0] == 'e') kind = 1; else if (s[0] == 'l') kind = 2; else return false;
@@ -167,7 +176,7 @@ struct TwinScen {
             prefmode = m == '0' ? 0 : m == '1' ? 1 : m == 'm' ? 2 : -1;
             if (tau <= 0 || prefmode < 0) return false;
         }
-        Rng r(mix(seed, hash_str(s)));      // per-cell properties: the same "chip" for every program
+        Rng r(mix(seed, hash_str(s)));      // per-cell properties: the same "chip" for every program and every mask
         for (int e = 0; e < 32; e++) {
             pref[e] = prefmode == 0 ? 0 : prefmode == 1 ? 0xFF : (uint8_t)(r.next() & 0xFF);
             for (int b = 0; b < 8; b++) { double L = tau * exp(sig * r.norm()); life[e][b] = L >= 4e9 ? NEVER - 1 : (u32)max(1.0, ceil(L)); }
@@ -175,17 +184,17 @@ struct TwinScen {
         return true;
     }
     inline int read(int si, int e, u64 now) const {
-        const Store& s = st[si]; int w = s.w[e];
+        const Store& s = st[si]; int w = s.w[e];        // node values
         if (kind && now >= s.dmin[e])
             for (int b = 0; b < 8; b++) if (now >= s.D[e][b]) w = (w & ~(1 << b)) | (((pref[e] >> b) & 1) << b);
-        return w;
+        return w ^ mask;
     }
-    void logdecays(int si, int e, u64 now) {
+    void logdecays(int si, int e, u64 now) {            // logged as the logical bit value the decay leaves
         Store& s = st[si];
-        for (int b = 0; b < 8; b++) if (s.D[e][b] <= now) log.push_back({(u64)s.D[e][b], (u64)e, (u64)b, (u64)((pref[e] >> b) & 1)});
+        for (int b = 0; b < 8; b++) if (s.D[e][b] <= now) log.push_back({(u64)s.D[e][b], (u64)e, (u64)b, (u64)(((pref[e] ^ mask) >> b) & 1)});
     }
-    void write(int si, int e, int val, u64 now) {
-        Store& s = st[si];
+    void write(int si, int e, int word, u64 now) {
+        Store& s = st[si]; int val = word ^ mask;          // node values
         if (kind && si == logst) logdecays(si, e, now);
         s.w[e] = (uint8_t)val; s.dmin[e] = NEVER;
         if (!kind) return;
@@ -465,7 +474,8 @@ struct OgehlP : Pred {
 //                              in the shadow of the static predictor (the twin never changes training): x = no decay
 //                              (flips with table tw go to these), e<tau>p<0|1|m> = exponential lifetime of mean tau
 //                              drawn at every write, l<tau>p<0|1|m> = per-cell fixed log-normal lifetime (median tau,
-//                              sigma dsig, default 0.5); preferred level 0, 1 or mixed (per cell, drawn once); dseed
+//                              sigma dsig, default 0.5); preferred level 0, 1 or mixed (per cell, drawn once); dseed;
+//                              suffix k<hex>: coset mask, the nodes hold word XOR mask (e1e3pmk21; default 0)
 //   twuse=1 code= rest=        the driving default prediction takes the twin of scenario 0 in that mode (TWIN_USE)
 //   dlog=<file>                the effective decay events of that copy, sequential instance (validation)
 //   lt=1                       fault lifetime: the fault-free predictor runs in lockstep; per flip, resolves until the
@@ -528,7 +538,7 @@ struct GehlRP : Pred {
         }
         for (TwinScen& sc : tws)
             for (int si = 0; si < 3; si++) {
-                sc.st[si].rng = Rng(mix(mix(dseed, ph), hash_str(sc.spec)));    // the same draws for the three copies while they agree
+                sc.st[si].rng = Rng(mix(mix(dseed, ph), hash_str(sc.base)));    // the same draws for the three copies while they agree
                 for (int e = 0; e < ent[nt - 1]; e++) sc.write(si, e, tw_encode(T[nt - 1][e]), 0);
             }
         for (const Flip& f : flips) if (f.tab == TG_TW && none_of(tws.begin(), tws.end(), [](const TwinScen& s) { return s.kind == 0; })) { fprintf(stderr, "twin flips need a twin scenario x\n"); exit(2); }

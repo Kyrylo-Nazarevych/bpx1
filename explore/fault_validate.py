@@ -160,7 +160,8 @@ def main():
                 cmp(f"twin flips CODE {code} RESTORE {rest}", [ms] + bm4[1:], sh[1:], mm, mf)
                 assert sh[0] == ms, (sh, ms)
         # 3. twin decay, exponential and log-normal, mixed preferred level, every CODE x RESTORE
-        for spec in ("e300pm", "l1000p0", "e3000p1"):
+        mk = os.environ.get("FV_MASK", "")          # coset mask on the twin's nodes (the model sees the logical word)
+        for spec in (s + (f"k{mk}" if mk else "") for s in ("e300pm", "l1000p0", "e3000p1")):
             for code in range(4):
                 for rest in range(2):
                     lg = os.path.join(work, f"{name}_{spec}_{code}{rest}.dlog")

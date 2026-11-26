@@ -36,6 +36,8 @@ RATES = ["1e-5", "1e-4", "1e-3", "1e-2"]
 TAUS = ["1e2", "3e2", "1e3", "3e3", "1e4", "3e4", "1e5", "1e6"]
 PREFS = ["0", "1", "m"]
 DISTS = ["e", "l"]
+MASKS = ["00", "03", "30", "21", "01", "0F", "F0", "3C"]
+MTAUS = ["1e3", "1e4", "1e5"]
 PRED = ["default", "bimodal", "gshare", "tournament"]
 MODES = [(c, r) for c in range(4) for r in range(2)]
 
@@ -53,6 +55,20 @@ def lines(part, seeds, rates=None):
         return [f"AT_{r}_{s} {CHIP} tws=x fi_tgt=tw fi_rate={r} fi_seed={s}" for r in rates for s in seeds]
     if part == "B":
         return [f"B_{d}{p}_{s} {CHIP} tws={','.join(f'{d}{t}p{p}' for t in TAUS)} dseed={s} dsig=0.5" for d in DISTS for p in PREFS for s in seeds]
+    # coset masks for the twin (docs/fault_campaign.md section 8)
+    if part == "M":
+        return [f"M_e{p}_{s} {CHIP} tws={','.join(f'e{t}p{p}k{m}' for m in MASKS for t in MTAUS)} dseed={s} dsig=0.5" for p in PREFS for s in seeds]
+    if part == "ML":       # log-normal family and the extra tau values, for the masks named in BPX_MASKS_L
+        ml = os.environ.get("BPX_MASKS_L", "00").split(",")
+        return [f"ML_{d}{p}_{s} {CHIP} tws={','.join(f'{d}{t}p{p}k{m}' for m in ml for t in taus)} dseed={s} dsig=0.5"
+                for d, taus in (("l", MTAUS + ["1e2", "1e6"]), ("e", ["1e2", "1e6"])) for p in PREFS for s in seeds]
+    if part == "MX":       # no decay: every mask must leave every count unchanged
+        out = [f"MX_all {CHIP} tws={','.join('xk' + m for m in MASKS)}"]
+        out += [f"MX_c{c}r{r} {CHIP} tws=xk{m} twuse=1 code={c} rest={r}" for c, r in MODES for m in ("21",)]
+        return out
+    if part == "MAT":      # Part A's flips into the twin, with the mask in BPX_MASK
+        m = os.environ.get("BPX_MASK", "00")
+        return [f"AT_{r}_{s} {CHIP} tws=xk{m} fi_tgt=tw fi_rate={r} fi_seed={s}" for r in rates for s in seeds]
     if part == "chk":
         out = [f"D_c{c}r{r} {CHIP} tws=e1e3pm dseed=1 twuse=1 code={c} rest={r}" for c, r in MODES]
         out += [f"U_off {CHIP} tws=e1e3pm dseed=1", f"U_off2 {CHIP} tws=l1e2p0,e1e4p1 dseed=2"]
@@ -419,6 +435,116 @@ def report():
             print(f"| {tau} | " + " | ".join(cells) + " |")
 
 
+def mask_analysis():
+    """Algebra of each mask against the twin's (8,4) code (model/bpx1.py tw_*): code word or not, syndrome, distance
+    to the code, and what a fully decayed word (nodes all 0 or all 1) decodes to under each CODE."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "model"))
+    import bpx1
+    code = [bpx1.tw_encode(d) for d in range(16)]
+    print("code words:", " ".join(f"{c:02X}" for c in code))
+    for ms in MASKS:
+        m = int(ms, 16)
+        dist = min(bin(m ^ c).count("1") for c in code)
+        syn = bpx1.tw_check(m & 15) ^ (m >> 4)
+        cells = []
+        for node in (0x00, 0xFF):
+            w = node ^ m
+            outs = []
+            for cd in range(4):
+                d, ab, cor = bpx1.tw_decode(w, cd)
+                outs.append("abstain" if ab else (f"w={d - 16 if d & 8 else d}" + (" (corrected)" if cor else "")))
+            cells.append(f"nodes {node:02X} -> word {w:02X}: " + ", ".join(f"C{cd} {o}" for cd, o in enumerate(outs)))
+        print(f"mask {ms}: weight {bin(m).count('1')}, code word {m in code}, syndrome {syn:X}, distance to code {dist}; " + "; ".join(cells))
+
+
+def mask_checks():
+    ref = plain_ref()
+    bad = []
+    for r in load("MX"):
+        p = r["program"]
+        if int(r["mis_cpu"]) != ref[p]["def_cpu"] or int(r["mis_seq"]) != ref[p]["def_seq"] or r["xc"]["m4"] != ref[p]["cpu"] or r["xs"]["m4"] != ref[p]["seq"]:
+            bad.append((r["config"], p))
+        for x in (r["xc"], r["xs"]):
+            for k, v in x.items():
+                if k.startswith("s") and v != [x["m4"][0], 0, 0, 0, 0]:
+                    bad.append((r["config"], p, k))
+    print(f"no decay, masks {MASKS} (shadow, all modes) and mask 21 driving in all 8 modes, 71 programs: every count equals the plain run, all flags 0: {not bad} {bad[:5]}")
+    # mask 00 in the M runs must reproduce Part B exactly (same seeds, same scenario seeds)
+    if have("B") and os.path.exists(os.path.join(OUT, "M.tsv")):
+        b = {(r["config"], r["program"]): r for r in load("B")}
+        nb = neq = 0
+        for r in load("M"):
+            _, fam, s = r["config"].split("_")
+            ob = b.get((f"B_{fam}_{s}", r["program"]))
+            if not ob:
+                continue
+            for jt, tau in enumerate(MTAUS):
+                jm = MASKS.index("00") * len(MTAUS) + jt
+                jb = TAUS.index(tau)
+                for c, rr in MODES:
+                    for inst in ("xc", "xs"):
+                        nb += 1
+                        neq += r[inst][f"s{jm}c{c}r{rr}"] != ob[inst][f"s{jb}c{c}r{rr}"]
+        print(f"mask 00 in the mask runs against Part B (same seeds): {nb - neq} of {nb} mode counts identical")
+
+
+def mask_report():
+    ref = plain_ref()
+    keep = lambda p: p not in EXCLUDE  # noqa: E731
+    data = {}
+    for tag in ("M", "ML"):
+        if not os.path.exists(os.path.join(OUT, tag + ".tsv")):
+            continue
+        cfgs = {l.split()[0]: l.split() for l in open(os.path.join(OUT, tag + ".cfg")) if l.strip()}
+        for r in load(tag):
+            p = r["program"]
+            if not keep(p):
+                continue
+            specs = next(t for t in cfgs[r["config"]] if t.startswith("tws=")).split("=")[1].split(",")
+            x, n, base = r["xc"], ref[p]["n"], ref[p]["cpu"][0]
+            for j, sp in enumerate(specs):
+                d, tau, pf, m = sp[0], sp[1:sp.index("p")], sp[sp.index("p") + 1], sp.split("k")[1]
+                for c, rr in MODES:
+                    v = x[f"s{j}c{c}r{rr}"]
+                    data.setdefault((m, d, pf, tau, c, rr), {}).setdefault(p, []).append((1000 * (v[0] - base) / n, 1000 * v[4] / n))
+    out = ["mask\tdist\tpref\ttau\tcode\trestore\textra_per_1k\tci_lo\tci_hi\tsdc_per_1k\tdiff_vs_mask00\tdiff_lo\tdiff_hi"]
+    summ = {}
+    for key, per in sorted(data.items()):
+        est, lo, hi, _ = boot_mean({p: [a for a, _ in v] for p, v in per.items()})
+        sdc = sum(sum(s for _, s in v) / len(v) for v in per.values()) / len(per)
+        k0 = ("00",) + key[1:]
+        dd = (float("nan"),) * 3
+        if k0 in data and key[0] != "00":
+            z = data[k0]
+            dd = boot_mean({p: [a - z[p][i][0] for i, (a, _) in enumerate(v)] for p, v in per.items()})[:3]
+        summ[key] = (est, lo, hi, sdc, dd)
+        out.append("\t".join(map(str, key)) + f"\t{est:.4f}\t{lo:.4f}\t{hi:.4f}\t{sdc:.3f}\t{dd[0]:.4f}\t{dd[1]:.4f}\t{dd[2]:.4f}")
+    os.makedirs(RES, exist_ok=True)
+    open(os.path.join(RES, "masks.tsv"), "w").write("\n".join(out) + "\n")
+    fams = sorted({k[1:3] for k in summ})
+    taus = sorted({k[3] for k in summ}, key=float)
+    masks = [m for m in MASKS if any(k[0] == m for k in summ)]
+    for d, pf in fams:
+        for tau in taus:
+            if not any(k[1:4] == (d, pf, tau) for k in summ):
+                continue
+            print(f"\n### masks, {d} {pf}, tau {tau}: extra per 1000 branches (SDC per 1000) [paired diff vs mask 00]\n")
+            print("| mask | " + " | ".join(f"C{c} R{r}" for c, r in MODES) + " |")
+            print("| --- | " + " | ".join("---" for _ in MODES) + " |")
+            for m in masks:
+                cells = []
+                for c, r in MODES:
+                    e = summ.get((m, d, pf, tau, c, r))
+                    if not e:
+                        cells.append("–")
+                        continue
+                    t = f"{e[0]:.2f} ({e[3]:.0f})"
+                    if m != "00" and e[4][0] == e[4][0]:
+                        t += f" [{e[4][0]:+.2f}{'*' if e[4][1] > 0 or e[4][2] < 0 else ''}]"
+                    cells.append(t)
+                print(f"| {m} | " + " | ".join(cells) + " |")
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
@@ -435,6 +561,12 @@ def main():
         checks()
     elif cmd == "report":
         report()
+    elif cmd == "masks":
+        mask_analysis()
+    elif cmd == "maskchecks":
+        mask_checks()
+    elif cmd == "maskreport":
+        mask_report()
     else:
         sys.exit(__doc__)
 
