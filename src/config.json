@@ -1,7 +1,7 @@
 {
   "//": "BPX-1 flow configuration. Every difference from the Tiny Tapeout template default is listed, with its reason and evidence, in docs/area.md (spec AL-02).",
 
-  "PL_TARGET_DENSITY_PCT": 84,
+  "PL_TARGET_DENSITY_PCT": 60,
 
   "//": "30 ns = 33 MHz: the clock at which the slow corner (ss, 100 C, 1.60 V) closes with margin, with the perceptron sum in the predict cycle (docs/timing.md).",
   "CLOCK_PERIOD": 30,

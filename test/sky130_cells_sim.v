@@ -77,3 +77,15 @@ module sky130_fd_sc_hd__a222oi_1 (
 );
   assign Y = ~((A1 & A2) | (B1 & B2) | (C1 & C2));
 endmodule
+
+// Tri-state inverter used as a dynamic storage node (bpx_ltab, DYN = 1): this model holds the last driven value
+// for ever (an ideal capacitor).  Real silicon leaks; the PDK's gate-level model shows the floating node as unknown.
+module sky130_fd_sc_hd__einvp_1 (
+    input  wire A,
+    input  wire TE,
+    output wire Z
+);
+  reg q;
+  always @* if (TE) q = ~A;
+  assign Z = q;
+endmodule
