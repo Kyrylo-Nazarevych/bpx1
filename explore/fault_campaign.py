@@ -40,16 +40,17 @@ PRED = ["default", "bimodal", "gshare", "tournament"]
 MODES = [(c, r) for c in range(4) for r in range(2)]
 
 
-def lines(part, seeds):
+def lines(part, seeds, rates=None):
+    rates = rates or RATES
     if part == "plain":
         out = [f"def {CHIP}", "bim bimodal n=64", "gsh gshare n=128 h=4", "trn tourn nb=64 ng=128 h=4 nc=64", "snt snt", f"t3 {CHIP3}"]
         out += [f"twx_c{c}r{r} {CHIP} tws=x twuse=1 code={c} rest={r}" for c, r in MODES]
         return out
     if part == "A":
         return [f"A_{t}_{r}_{s} {CHIP} fi_tgt={t} fi_rate={r} fi_seed={s}" + (" lt=1" if float(r) <= 1e-4 else "")
-                for t in TARGETS for r in RATES for s in seeds]
+                for t in TARGETS for r in rates for s in seeds]
     if part == "AT":
-        return [f"AT_{r}_{s} {CHIP} tws=x fi_tgt=tw fi_rate={r} fi_seed={s}" for r in RATES for s in seeds]
+        return [f"AT_{r}_{s} {CHIP} tws=x fi_tgt=tw fi_rate={r} fi_seed={s}" for r in rates for s in seeds]
     if part == "B":
         return [f"B_{d}{p}_{s} {CHIP} tws={','.join(f'{d}{t}p{p}' for t in TAUS)} dseed={s} dsig=0.5" for d in DISTS for p in PREFS for s in seeds]
     if part == "chk":
@@ -66,19 +67,20 @@ def traces(progs=None):
     return t
 
 
-def run(part, seeds, progs, tag, seq=1):
+def run(part, seeds, progs, tag, seq=1, rates=None):
     os.makedirs(OUT, exist_ok=True)
     cfg, tsv = os.path.join(OUT, tag + ".cfg"), os.path.join(OUT, tag + ".tsv")
-    open(cfg, "w").write("\n".join(lines(part, seeds)) + "\n")
+    ls = lines(part, seeds, rates)
+    open(cfg, "w").write("\n".join(ls) + "\n")
     tr = traces(progs)
     t0 = time.time()
     r0 = os.times()
     subprocess.check_call(["nice", "-n", "10", BIN, "W=8", f"threads={THREADS}", f"seq={seq}", cfg, tsv] + tr)
     r1 = os.times()
     cpu = (r1.children_user + r1.children_system) - (r0.children_user + r0.children_system)
-    print(f"{tag}: {len(lines(part, seeds))} configs x {len(tr)} programs, {time.time() - t0:.1f} s elapsed, {cpu:.1f} s CPU")
+    print(f"{tag}: {len(ls)} configs x {len(tr)} programs, {time.time() - t0:.1f} s elapsed, {cpu:.1f} s CPU")
     with open(os.path.join(OUT, "cpu_time.log"), "a") as f:
-        f.write(f"{tag}\t{part}\t{len(lines(part, seeds))}\t{len(tr)}\t{time.time() - t0:.1f}\t{cpu:.1f}\n")
+        f.write(f"{tag}\t{part}\t{len(ls)}\t{len(tr)}\t{time.time() - t0:.1f}\t{cpu:.1f}\n")
 
 
 # ------------------------------------------------------------------------------------------- loading
@@ -92,8 +94,17 @@ def parse_x(s):
     return d
 
 
+PREFIX = os.environ.get("BPX_FI_PREFIX", "")     # report on runs tagged <prefix>A, <prefix>AT, <prefix>B (pilot)
+
+
+def have(tag):
+    return os.path.exists(os.path.join(OUT, PREFIX + tag + ".tsv"))
+
+
 def load(tag):
     rows = []
+    if tag in ("A", "AT", "B"):
+        tag = PREFIX + tag
     for r in csv.DictReader(open(os.path.join(OUT, tag + ".tsv")), delimiter="\t"):
         r["xs"], r["xc"] = parse_x(r["x_seq"]), parse_x(r["x_cpu"])
         rows.append(r)
@@ -237,7 +248,10 @@ def report():
     ref = plain_ref()
     keep = lambda p: p not in EXCLUDE  # noqa: E731
     # ---- Part A, static tables
-    rows = load("A") if os.path.exists(os.path.join(OUT, "A.tsv")) else []
+    rows = load("A") if have("A") else []
+    for extra in sorted(glob.glob(os.path.join(OUT, PREFIX + "Amore*.tsv"))):    # more seeds / rates, same configuration names
+        rows += load(os.path.basename(extra)[:-4])
+    rates_in = sorted({r["config"].split("_")[2] for r in rows}, key=float)
     data, lt, nfault = {}, {}, {}
     for r in rows:
         _, t, rate, s = r["config"].split("_")
@@ -263,8 +277,18 @@ def report():
         out.append(f"{t}\t{rate}\t{PRED[k]}\t{inst}\t{est:.4f}\t{lo:.4f}\t{hi:.4f}\t{pooled:.4f}\t{nf}\t{q(pv, .1):.4f}\t{q(pv, .5):.4f}\t{q(pv, .9):.4f}\t{pv[0]:.4f}\t{pv[-1]:.4f}")
     if rows:
         open(os.path.join(RES, "partA.tsv"), "w").write("\n".join(out) + "\n")
+        for inst, iname in (("cpu", "CPU model"), ("seq", "one in flight")):
+            print(f"\n### Part A summary ({iname}): extra mispredictions per fault [95 % CI], rate {rates_in}; seeds per rate\n")
+            for t in TARGETS:
+                for k in range(4):
+                    cells = []
+                    for rate in rates_in:
+                        e = tab.get((t, rate, k, inst))
+                        ns = len(next(iter(data[(t, rate, k, inst)].values())))
+                        cells.append(f"{e[0]:.3f} [{e[1]:.3f}, {e[2]:.3f}] s{ns}")
+                    print(f"| {t} | {PRED[k]} | " + " | ".join(cells) + " |")
         print("\n### Part A: extra mispredictions per fault (CPU model, mean over programs, 95 % CI)\n")
-        for rate in RATES:
+        for rate in rates_in:
             print(f"\nrate {rate} per resolved branch\n")
             print("| Target | " + " | ".join(PRED) + " | faults |")
             print("| --- | " + " | ".join("---" for _ in PRED) + " | --- |")
@@ -291,7 +315,7 @@ def report():
             print(f"| {t} | {rate} | {n} | {100 * er / max(n, 1):.1f} %, {es / max(er, 1):.0f} | {100 * gr / max(n, 1):.1f} %, {gs / max(gr, 1):.0f} | {100 * cn / max(n, 1):.1f} % |")
         open(os.path.join(RES, "partA_lifetime.tsv"), "w").write("\n".join(lo_) + "\n")
     # ---- Part A on the twin
-    if os.path.exists(os.path.join(OUT, "AT.tsv")):
+    if have("AT"):
         data = {}
         for r in load("AT"):
             p = r["program"]
@@ -318,7 +342,7 @@ def report():
             print(f"| {rate} | {c} | {rr} | {est:.3f} [{lo:.3f}, {hi:.3f}] | " + " | ".join(f"{e:.1f}" for e in ev) + f" | {epe:.4f} |")
         open(os.path.join(RES, "partA_twin.tsv"), "w").write("\n".join(out) + "\n")
     # ---- Part B
-    if os.path.exists(os.path.join(OUT, "B.tsv")):
+    if have("B"):
         data = {}
         abst, t3 = {}, {}
         for p in ref:
@@ -362,6 +386,28 @@ def report():
                         e = summary.get((d, pf, tau, c, r))
                         cells.append("–" if not e else f"{e[0]:.2f} [{e[1]:.2f}, {e[2]:.2f}]")
                     print(f"| {tau} | " + " | ".join(cells) + " |")
+        # paired comparisons (same programs, seeds and decay draws): difference of extra mispredictions per 1000 branches
+        def paired(key_a, key_b=None, ref_b=None):
+            pa = data[key_a]
+            per = {p: [a[0] - (data[key_b][p][i][0] if key_b else ref_b[p][0]) for i, a in enumerate(v)] for p, v in pa.items()}
+            return boot_mean(per)
+        cols = [("C2R1 − C3R0", (2, 1), (3, 0), None), ("C2R0 − C3R0", (2, 0), (3, 0), None), ("C3R1 − C3R0", (3, 1), (3, 0), None),
+                ("C2R1 − C2R0", (2, 1), (2, 0), None), ("C0R0 − abstain", (0, 0), None, abst), ("C3R0 − abstain", (3, 0), None, abst),
+                ("C2R1 − abstain", (2, 1), None, abst), ("C2R1 − 3-table", (2, 1), None, t3), ("C3R0 − 3-table", (3, 0), None, t3)]
+        pout = ["dist\tpref\ttau\tcomparison\tdiff_per_1k\tci_lo\tci_hi"]
+        for d in DISTS:
+            for pf in PREFS:
+                print(f"\n### Part B paired differences, {d} {pf}: extra mispredictions per 1000 branches, A − B [95 % CI]; negative = A better\n")
+                print("| tau | " + " | ".join(c[0] for c in cols) + " |")
+                print("| --- | " + " | ".join("---" for _ in cols) + " |")
+                for tau in TAUS:
+                    cells = []
+                    for name, ma, mb, rb in cols:
+                        e, lo, hi, _ = paired((d, pf, tau) + ma, (d, pf, tau) + mb if mb else None, rb)
+                        cells.append(f"{e:+.2f} [{lo:+.2f}, {hi:+.2f}]")
+                        pout.append(f"{d}\t{pf}\t{tau}\t{name}\t{e:.4f}\t{lo:.4f}\t{hi:.4f}")
+                    print(f"| {tau} | " + " | ".join(cells) + " |")
+        open(os.path.join(RES, "partB_paired.tsv"), "w").write("\n".join(pout) + "\n")
         print("\n### Part B events, exponential, mixed: TW_ERR / TW_COR / TW_DET / TW_SDC per 1000 branches; extra mispredictions per faulty read\n")
         print("| tau | " + " | ".join(f"C{c} R{r}" for c, r in MODES) + " |")
         print("| --- | " + " | ".join("---" for _ in MODES) + " |")
@@ -383,7 +429,8 @@ def main():
         part = args[0]
         seeds = [int(s) for s in opts.get("seeds", "1,2,3").split(",")]
         progs = set(opts["progs"].split(",")) if "progs" in opts else None
-        run(part, seeds, progs, opts.get("tag", part), int(opts.get("seq", "1")))
+        rates = opts["rates"].split(",") if "rates" in opts else None
+        run(part, seeds, progs, opts.get("tag", part), int(opts.get("seq", "1")), rates)
     elif cmd == "checks":
         checks()
     elif cmd == "report":
