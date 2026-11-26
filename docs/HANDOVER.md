@@ -54,8 +54,8 @@ them back to the Windows folder after generating (the sync is one-way, Windows t
 - LibreLane's synthesis may not use drive-strength-1 gates (`no_synth.cells`); explicitly instantiated cells are
   unaffected. The repository's `src/config.json` allows the small cells and excludes the slow delay buffers.
 - Table cost after synthesis: `550 + entries × (20.5 × bits + 6.5)` µm².
-- Local build of the real chip (before the two fixes): 75.9 % utilisation, DRC/LVS/antenna 0, setup +3.35 ns at the
-  slow corner for 25 ns, hold +0.06 ns (docs/area.md, docs/timing.md). CI of `ee6574a` (real chip) and of `dacaf07`
+- Local build of the final RTL: 75.6 % utilisation, DRC/LVS/antenna 0, setup +4.83 ns at the slow corner for
+  25 ns, hold +0.06 ns, gate-level tests pass (docs/area.md, docs/timing.md); the build takes 17 minutes. CI of `ee6574a` (real chip) and of `dacaf07`
   (deadlock fix): gds, precheck, gl_test, viewer, test, docs all green.
 - **Commit and push from the Windows folder** (Git Bash or PowerShell; `gh` is logged in there). Never commit in
   the mirror: the next sync replaces the mirror's `.git` with the Windows one and the commit is gone (this happened
@@ -65,8 +65,9 @@ them back to the Windows folder after generating (the sync is one-way, Windows t
   the formal tasks 0.5 to 12 minutes each with small tables. Full-size tables make each BMC step 10 to 30 s.
 - Never `pkill -f <pattern>` through `wsl.exe -- bash -c "..."`: the pattern matches the shell that runs it. Put
   kills in a script file.
-- `explore/bpsim` and the golden model differ slightly for the default predictor (0.03 points of mean accuracy);
-  they agree for the references. Cause not isolated.
+- `explore/bpsim` and the golden model differ slightly for the default predictor (0.03 points of mean accuracy):
+  they step the allocation randomiser at different moments. With it off they are identical; they agree for the
+  references (verification.md 2).
 - The Vast CLI's `create instance --raw` prints a per-instance key: do not use `--raw` there. `vastai destroy
   instance` needs `-y`.
 
@@ -80,14 +81,12 @@ them back to the Windows folder after generating (the sync is one-way, Windows t
 3. Close the simulation gap that let the deadlock through: a concurrent-control-port mode in `cosim --rand` (SPI
    commands issued while requests are in flight; replies are order-independent only for some commands, so the
    generator must restrict itself to snapshot, statistics reads and raw reads). Formal already covers it.
-4. Isolate the `bpsim` / golden-model difference (diff the two on `team.interpreter`, 240k branches: 67 against 65
-   mispredictions), then decide whether docs/exploration.md needs a note beyond the one in verification.md.
-5. Host kit on hardware: `host/bpx1.py` has not run on a demo board; microcotb port of `test/test.py`
+4. Host kit on hardware: `host/bpx1.py` has not run on a demo board; microcotb port of `test/test.py`
    (docs/bringup.md 6).
-6. Optional improvements, none blocking: slew warnings at the slow corner on the table select nets; 50 MHz by
+5. Optional improvements, none blocking: slew warnings at the slow corner on the table select nets; 50 MHz by
    registering the lookup one clock earlier; Verilator width-extension lint warnings; the remaining factorial
    trial builds (density 86, default cells).
-7. G4: submission to the shuttle is the owners' step.
+6. G4: submission to the shuttle is the owners' step.
 
 ## 6. Commands
 
@@ -120,7 +119,7 @@ verification round used no rented machine:** everything ran on the PC in minutes
 | --- | --- |
 | A defect like the deadlock that neither simulation nor the present proofs see | Reduced, not gone. The proofs cover the sequencer under free inputs; the predictor arithmetic, the SPI shifter and the synchronisers are covered by simulation only. Step 3 above narrows it further. |
 | Latch write paths outside static timing | Accepted by construction; exercised at cell and gate level; bring-up has a procedure for it (docs/bringup.md 4). |
-| Timing after the fixes | Open until the CI run of the last push is read. |
+| Timing after the fixes | Closed locally: +4.83 ns at the slow corner. |
 | Benchmark programs have few branch sites (median 49) | Known limit of small embedded programs; Embench's `nsichneu` (640 sites) is the stress case. |
 | The FPGA CPU does not exist yet | The contract (SPEC 9) is what the numbers assume. Sensitivity: docs/exploration.md (no BTB 1.056×; later resolve 1.198× / 1.258×). |
 

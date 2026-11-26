@@ -1,20 +1,21 @@
 # BPX-1 timing (DR-03, PF-04, XR-04, XR-05)
 
-All numbers **(VERIFIED)** from the local LibreLane sign-off STA of the repository build, 27 Nov 2026.
+All numbers **(VERIFIED)** from the local LibreLane sign-off STA of the build of the final RTL, 26 Nov 2026.
 
 | Corner | Setup worst slack at 25 ns (40 MHz) | Hold |
 | --- | --- | --- |
-| Slow: ss, 100 °C, 1.60 V | +3.35 ns | |
+| Slow: ss, 100 °C, 1.60 V | +4.83 ns | |
 | Typical: tt, 25 °C, 1.80 V | +11.51 ns | |
 | All corners | 0 violations | worst slack +0.06 ns, 0 violations |
 
-**Signed-off clock: 40 MHz**, with 3.3 ns (13 %) of margin at the slow corner; at the typical corner the same
+**Signed-off clock: 40 MHz**, with 4.8 ns (19 %) of margin at the slow corner; at the typical corner the same
 netlist would run at about 74 MHz. PF-04 asks for a clock fast enough for IR-07 (a 1 MHz CPU): met about nine
 times over (below).
 
-**Critical path** (slow corner, 21.7 ns): request-pending decode → read-port select → table address → row select
-with its fan-out buffers → latch read tree → column mux → tag compare → provider select → queue and output flops.
-About a third is fan-out buffering of the read selects. Reserve for 50 MHz and beyond: register the lookup one clock
+**Critical path** (slow corner: 20.2 ns in this build, 21.7 ns in the build at G2). Its composition was read in
+the G2 build and not again in this one **(ESTIMATED to be the same path)**: request-pending decode → read-port
+select → table address → row select with its fan-out buffers → latch read tree → column mux → tag compare →
+provider select → queue and output flops. About a third is fan-out buffering of the read selects. Reserve for 50 MHz and beyond: register the lookup one clock
 earlier from the captured identifier (it hides in the synchroniser delay and adds no latency).
 
 **Latency and the CPU clock it serves (O3, IR-07).** The acknowledge and the prediction leave the chip at the third

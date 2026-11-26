@@ -1,21 +1,22 @@
 # BPX-1 area (DR-03, XR-02, AL-02)
 
-All numbers **(VERIFIED)** from local LibreLane builds (same flow version as the CI), 27 Nov 2026.
+All numbers **(VERIFIED)** from local LibreLane builds (same flow version as the CI); the result table is the
+build of the final RTL (after the two sequencer fixes of docs/verification.md 4), 26 Nov 2026.
 
 ## Result
 
 | Quantity | Value |
 | --- | --- |
 | Core area | 72,565 µm² |
-| Standard cells, routed | 55,072 µm² |
-| Utilisation: LibreLane `design__instance__utilization` | 75.9 % |
-| Utilisation: Tiny Tapeout `--print-stats` | 74.3 % |
-| Sequential cells (1,168 table and snapshot latches, about 430 flops) | 26,732 µm² |
-| Combinational cells | 21,519 µm² |
-| Timing-repair buffers | 4,123 µm² |
-| Clock tree | 955 µm² |
+| Standard cells, routed | 54,834 µm² |
+| Utilisation: LibreLane `design__instance__utilization` | 75.6 % |
+| Utilisation: Tiny Tapeout `--print-stats` | 74.1 % |
+| Sequential cells (1,168 table and snapshot latches, about 430 flops) | 26,728 µm² |
+| Combinational cells | 21,260 µm² |
+| Timing-repair buffers | 4,219 µm² |
+| Clock tree | 952 µm² |
 | Growth from synthesised (48,250) to routed cell area | +14 % |
-| Wire length | 187 mm |
+| Wire length | 182 mm |
 | Routing DRC, Magic DRC, LVS, antenna | 0, 0, 0, 0 |
 
 Synthesised split (Yosys, hierarchy kept): tables 23,000 (bimodal+chooser 5,400, gshare 5,400, three tagged tables
@@ -41,13 +42,14 @@ port and synchronisers 2,400.
 | A | small | 84 | – | 83.8 % | Stopped: 12,734 routing violations, 399 mm estimated wire |
 | B | small | 80 | fan-out 16, hold margins | 78.0 % | Clean after 17 routing passes; slow-corner setup −4.7 ns at 20 ns |
 | C | small | 80 | B + slow delay cells excluded | 75.9 % | Clean; slow-corner setup −1.65 ns at 20 ns |
-| Repository | as C | 80 | clock 25 ns | 75.9 % | Clean; all corners met |
+| Repository at G2 | as C | 80 | clock 25 ns | 75.9 % | Clean; all corners met |
+| Repository, final RTL | as C | 80 | clock 25 ns | 75.6 % | Clean; all corners met; gate-level tests pass |
 
 Not yet run: the default-cell column of the planned factorial (it would need about 7,000 µm² cut from the logic)
 and density 86.
 
 ## Known deviations
 
-XR-03 (SHOULD): 2,611 max-slew and 11 max-capacitance warnings at the slow corner, on the wide nets of the tables
+XR-03 (SHOULD): 2,450 max-slew, 4 max-capacitance and 1 max-fan-out warnings at the slow corner, on the wide nets of the tables
 (write data, row selects, gate terms). Their delays are included in the sign-off timing. Reducing them (repair at
 the slow corner) is an open improvement.

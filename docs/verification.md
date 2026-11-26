@@ -35,9 +35,12 @@ and the real latch cells with their write pulses, and the gate-level test runs t
 Limits of this evidence: the model and the RTL were written by the same author from the same specification, so a
 misreading of the specification would be in both. The cross-check against an independently written simulator
 (`explore/bpsim`, cosim.md 6) agrees exactly for the three reference predictors' in-flight runs on 66 to 69 of 69
-programs, and differs slightly for the default predictor (mean accuracy 91.27 % against 91.24 %; cause not
-isolated **(DON'T KNOW; settle by diffing the two on one trace)**). The exploration numbers of docs/exploration.md
-therefore differ from the RTL numbers by that much; the RTL numbers are the ones to quote.
+programs, and differs slightly for the default predictor (mean accuracy 91.27 % against 91.24 %). The cause is
+the allocation randomiser: with it switched off in both, the simulator and the golden model give identical
+misprediction counts (82 and 82 on `team.interpreter`, 70,648 and 70,648 on `sort.quick`); with it on, the two step
+their pseudo-random sequence at different moments (67 against 65, 70,499 against 70,529) **(VERIFIED)**. So the
+difference is noise between two equally valid random sequences, not a loss in the RTL. The exploration numbers of
+docs/exploration.md differ from the RTL numbers by that much; the RTL numbers are the ones to quote.
 
 ## 3. System co-simulation (VR-06)
 
@@ -142,9 +145,9 @@ that claim is the formal task `nowait`, not an argument.
 
 CI run of commit `ee6574a` (the first with the real chip as top) **(VERIFIED by reading the run)**: `gds`
 success (33 minutes), `precheck` success, `gl_test` success (the cocotb tests on the placed-and-routed netlist),
-`viewer`, `test`, `docs` success. Local sign-off of the same sources (docs/area.md, docs/timing.md): utilisation
-75.9 %, routing, Magic and KLayout DRC 0, LVS 0, antenna 0; setup slack +3.35 ns at the slow corner for the 25 ns
-clock, hold +0.06 ns; 2,611 maximum-slew warnings at the slow corner on the tables' select nets (warnings of the
+`viewer`, `test`, `docs` success. Local sign-off of the final RTL (docs/area.md, docs/timing.md) **(VERIFIED)**: utilisation
+75.6 %, routing and Magic DRC 0, LVS 0, antenna 0; setup slack +4.83 ns at the slow corner for the 25 ns
+clock, hold +0.06 ns; the three cocotb tests pass on its netlist; 2,450 maximum-slew warnings at the slow corner on the tables' select nets (warnings of the
 library's characterisation range, not timing violations; the paths through them are inside the reported slack).
 The utilisation figure of the CI run was not read **(DON'T KNOW: it is on the run's summary page, which the command
 line does not return)**.
@@ -159,7 +162,6 @@ file; its CI run is the sign-off for them (docs/HANDOVER.md, next steps).
 | --- | --- |
 | A request withdrawn before its acknowledge is covered by formal only | The golden model has no notion of it; the chip counts it as misuse. |
 | Control-port commands in the same clock as a request are covered by formal only | Random simulation alternates them. This is the gap the deadlock went through; a concurrent-SPI mode of `cosim --rand` would close it in simulation too. |
-| The exploration simulator and the golden model differ slightly for the default predictor | Section 2. Does not affect the chip; affects how exactly docs/exploration.md predicts the RTL numbers (0.03 points). |
 | microcotb port of the tests, and the host code on real hardware | docs/bringup.md. |
 
 ## 8. Commands
