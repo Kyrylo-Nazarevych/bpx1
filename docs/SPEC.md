@@ -1,7 +1,8 @@
 # BPX-1 design specification (DR-01)
 
-Status: **gate G1: protocol and predictor frozen.** The RTL (`src/bpx_*.v`) and the golden model (`model/bpx1.py`)
-implement this document; physical closure (section 8) is in progress. Evidence labels as in the requirements specification, section 10.
+Status: **perceptron default predictor** (owner requirement of 26 Nov 2026; exploration and decisions in
+docs/perceptron.md). The RTL (`src/bpx_*.v`) and the golden model (`model/bpx1.py`) implement this document. The
+earlier design with tagged tables, verified to gate G3, is the tag `g3-tage`. Evidence labels as in the requirements specification, section 10.
 
 ## 1. What the chip is
 
@@ -11,8 +12,8 @@ static not-taken, **drives**: its prediction is the one returned to the host. A 
 control, statistics and access to every state bit while the predict port keeps running.
 
 ```
-            ui_in[7:0] uio[3:0]            uio[7]                       uo[0] uo[1] uo[2]  uo[3]  uo[4]
-              ID        ID/OP               REQ                          ACK   PRED  CONF   FULL   READY
+            ui_in[7:0] uio[3:2]            uio[7]                       uo[0] uo[1] uo[2]  uo[3]  uo[4]
+              ID         OP                 REQ                          ACK   PRED  CONF   FULL   READY
                |          |                  |                            ^     ^     ^      ^      ^
         +------v----------v------------------v----------------------------+-----+-----+------+------+-----+
         |  synchronisers (2 flops per input pin)                        output flops                      |
@@ -25,11 +26,11 @@ control, statistics and access to every state bit while the predict port keeps r
         |        | read address (id, history)   | read data                                     |         |
         |   +----v------------------------------+---------------------------------+        +----+------+  |
         |   | predictor datapath: hashes, latch tables (one read port, one write  |<------>| control   |  |
-        |   | port per table), tag compare, combine, confidence, training logic   |  state | port (SPI)|  |
+        |   | port per table), weight sum, combine, confidence, training logic    |  state | port (SPI)|  |
         |   +---------------------------------------------------------------------+ access +--+-----^--+  |
         +----------------------------------------------------------------------------------- | --- | ------+
                                                                               uo[7] MISO <---+     +--- uio[4] CSn, uio[5] SCK, uio[6] MOSI
-                                                                              uo[5], uo[6]: debug event pins
+                                                                              uo[5], uo[6]: debug event pins; uio[0], uio[1]: prediction pins
 ```
 
 One clock domain (`clk`). Every input pin, including `rst_n`, passes through two flops before it is used (RR-01).
@@ -37,12 +38,14 @@ No combinational path from any input to any output (XR-05): every output pin is 
 
 ## 2. Pin map
 
-All eight bidirectional pins are **inputs** (`uio_oe = 0` always): the chip can never fight the host on a shared pin.
+`uio[7:2]` are **inputs** and `uio[1:0]` are **outputs**, always (`uio_oe = 0x03`): no pin changes direction, so
+the chip can never fight a host that leaves `uio[1:0]` undriven.
 
 | Pin | Name | Dir | Function |
 | --- | --- | --- | --- |
-| `ui_in[7:0]` | `ID[7:0]` | in | Branch identifier, low bits. |
-| `uio[1:0]` | `ID[9:8]` | in | Branch identifier, high bits (also the sub-operation when `OP = 00`). |
+| `ui_in[7:0]` | `ID[7:0]` | in | Branch identifier (`ID[1:0]` is the sub-operation when `OP = 00`). |
+| `uio[0]` | `PBIM` | **out** | Prediction of the bimodal predictor for the last predict. Changes with `ACK`. |
+| `uio[1]` | `PGSH` | **out** | Prediction of the gshare predictor for the last predict. Changes with `ACK`. |
 | `uio[3:2]` | `OP[1:0]` | in | Operation (section 3). |
 | `uio[4]` | `CSn` | in | Control port chip select, active low. |
 | `uio[5]` | `SCK` | in | Control port clock (SPI mode 0). |
@@ -50,22 +53,23 @@ All eight bidirectional pins are **inputs** (`uio_oe = 0` always): the chip can 
 | `uio[7]` | `REQ` | in | Request: every **toggle** asks for one operation. |
 | `uo_out[0]` | `ACK` | out | Acknowledge: toggles once per request. A request is pending while `REQ != ACK`. |
 | `uo_out[1]` | `PRED` | out | Prediction of the driving predictor (1 = taken). Valid from the `ACK` toggle of a predict until the next `ACK` toggle. |
-| `uo_out[2]` | `CONF` | out | Confidence of the default predictor's prediction (1 = high). Same validity as `PRED`. |
+| `uo_out[2]` | `CONF` | out | Confidence of the driving predictor's prediction (1 = high; 0 for static not-taken). Same validity as `PRED`. |
 | `uo_out[3]` | `FULL` | out | The in-flight queue is full: a plain predict would be refused. |
 | `uo_out[4]` | `READY` | out | Reset and table initialisation are complete; requests are accepted. |
-| `uo_out[5]`, `uo_out[6]` | `DBG0`, `DBG1` | out | Internal events, selected at runtime (section 6.4). |
+| `uo_out[5]`, `uo_out[6]` | `DBG0`, `DBG1` | out | Internal events, selected at runtime (section 6.4). After reset: the predictions of the default predictor and of the tournament for the last predict, so that with `PBIM` and `PGSH` all four predictions are on pins. |
 | `uo_out[7]` | `MISO` | out | Control port data out (0 while `CSn` is high). |
 
 Why these pins **(VERIFIED by the research agent against the demo-board firmware and the RP2350 function table)**:
 on the RP2350 demo board `uio[5]`, `uio[6]` and `uo_out[7]` are the SCK, TX and RX pins of hardware SPI1, so the
-control port can be driven by `machine.SPI` (IR-03); `ui_in[7:0]`, `uio[3:0]` are twelve consecutive GPIOs
-(17–28), which a PIO program drives as one output group, with `REQ` and `ACK`/`PRED` next to them. Tiny Tapeout's
+control port can be driven by `machine.SPI` (IR-03); `ui_in[7:0]` are eight consecutive GPIOs, which a PIO
+program drives as one output group, with `OP`, `REQ` and `ACK`/`PRED` next to them. Tiny Tapeout's
 recommended SPI pinout (CS, MOSI, MISO, SCK on `uio[0..3]`) does not line up with any RP2350 hardware SPI and needs an
 output on `uio`; it is a recommendation, not a rule, and is not followed.
 
-Sixteen pins can be inputs. The control port takes three and the handshake three (`REQ`, `OP`), which leaves ten
-for the identifier. Section 7 shows that ten bits do not limit accuracy on the benchmark set (IR-05) and documents
-the host-side fold.
+**Identifier width.** Eight bits. Measured on 4,000 predictor candidates and all programs, 8 against 10 bits
+changes the best 200 candidates by −0.00001× of speedup and −0.003 points of accuracy on average (docs/perceptron.md
+7): no table has more than 128 entries and none is tagged, so further identifier bits only reshuffle which
+branches collide. The two pins this frees carry the bimodal and gshare predictions.
 
 ## 3. Host protocol (predict port)
 
@@ -148,17 +152,18 @@ single steps. Raw table reads use cycles the predict port leaves free and never 
 | Addr | Name | Access | Content |
 | --- | --- | --- | --- |
 | 0x00 | ID | R | `0xB101` |
-| 0x01 | CTRL | RW | `[2:0]` driving predictor: 0 default, 1 bimodal, 2 gshare, 3 tournament, 4–7 static not-taken; `[3]` freeze learning; `[7:4]` DBG0 event; `[11:8]` DBG1 event |
+| 0x01 | CTRL | RW | `[2:0]` driving predictor: 0 default, 1 bimodal, 2 gshare, 3 tournament, 4–7 static not-taken; `[3]` freeze learning; `[7:4]` DBG0 event; `[11:8]` DBG1 event; `[15:12]` features of the default predictor (section 7): `[12]` reference inputs, `[13]` negation in memory, `[14]` adaptive threshold, `[15]` binarised inference (experiment). After reset: `0x7DA0`. |
 | 0x02 | CMD | W | bit 0 soft reset; bit 1 clear predictors (tables, histories, in-flight work); bit 2 clear statistics and error flags; bit 3 snapshot the statistics; bit 4 snapshot and clear the counters in one step (no event lost or counted twice) |
 | 0x03 | STATUS | R | `[2:0]` in-flight count; `[3]` ready; `[4]` staging valid; `[5]` request pending; `[6]` table write in progress; `[7]` raw access pending; `[8]` resolve refused (queue empty); `[9]` predict refused (queue full); `[10]` request withdrawn; `[11]` statistics overflow (flags are sticky) |
 | 0x04 | ERRCNT | R | `[7:0]` refused or withdrawn requests, saturating |
 | 0x05–0x0E | STATS | R | Snapshot taken by CMD bit 3, two words (low, high) per counter: resolved branches, then mispredictions of default, bimodal, gshare, tournament. Counters are 16 bits and saturate (never wrap; overflow is flagged in STATUS). For exact totals of longer runs use snapshot-and-clear at least every 65,535 branches and add the snapshots up (FR-08). |
-| 0x0F | RAW_ADDR | RW | `[6:0]` entry; `[10:8]` space: 0 bimodal+chooser, 1 gshare, 2… tagged tables, 7 small registers; `[13:12]` field write enables; `[15]` address + 1 after each RAW_DATA read |
+| 0x0F | RAW_ADDR | RW | `[6:0]` entry; `[11:8]` space: 0 bimodal+chooser, 1 gshare, 7 small registers, 8–11 weight tables 0–3; `[13:12]` field write enables; `[15]` address + 1 after each RAW_DATA read |
 | 0x10 | RAW_DATA | RW | Read: the addressed entry (fetched after RAW_ADDR is written and after each read). Write: the entry fields enabled in RAW_ADDR. |
 
-Raw entries: space 0 `{chooser[1:0], bimodal[1:0]}`; space 1 `gshare[1:0]`; tagged `{u[1:0], tag, ctr[2:0]}`.
-Space 7: 0–1 committed history, 2–3 speculative history (12 bits each), 4 `{LFSR[7:0], use-alternate[3:0]}`
-(writable), 5 queue pointers and flags. Every bit of predictor state and
+Raw entries: space 0 `{chooser[1:0], bimodal[1:0]}`; space 1 `gshare[1:0]`; weight tables `w[4:0]` (two's
+complement, write enable bit 12). Space 7: 0–1 committed outcome history, 2–3 speculative outcome history (12 bits
+per word), 4 `{theta[5:0], adaptation counter[3:0]}` (writable), 5–6 committed path history, 7–8 speculative path
+history, 9 queue pointers and flags. Every bit of predictor state and
 configuration is readable while requests run (FR-10); tables and the two small predictor registers are writable.
 
 DBG events (CTRL): 1 request seen, 2 predict done, 3 resolve done, 4 misprediction repair, 5 flush, 6 refusal or
@@ -234,70 +239,66 @@ frozen chip still predicts with real history and can be scored (FR-09).
 done, resolve done, flush, misprediction of the driving predictor, refusal, write pulse cycle, staging valid, queue
 empty, each predictor's raw prediction, control-port byte strobe, …; list fixed at G1). Two pins: with `ACK`,
 `PRED`, `FULL` and `READY` already on pins, any operation or error can be reconstructed from two selectable events,
-and the remaining output is needed for `MISO`.
+and the remaining output is needed for `MISO`. After reset `DBG0` = event 10 and `DBG1` = event 13: with the fixed
+`PBIM` and `PGSH` pins the last prediction of each of the four predictors is on a pin, valid with `ACK` (the
+prediction events change in the same clock as `ACK`; the other events one clock after they happen).
 
-## 7. Predictor algorithm (frozen at G1; evidence in docs/exploration.md)
+## 7. Predictor algorithm (evidence in docs/perceptron.md and docs/exploration.md)
 
-Total predictor storage: **1,088 bits** in five latch tables. `fold(v, n)` is the XOR of the consecutive n-bit
-slices of v; `h[L-1:0]` are the L most recent outcomes of the history in use (bit 0 = most recent).
+Total predictor storage: **1,152 bits** in six latch tables. `fold(v, n)` is the XOR of the consecutive n-bit
+slices of v; `h[L-1:0]` are the L most recent outcomes of the history in use (bit 0 = most recent); `p[15:0]` is the
+path history: one bit, `ID[0] ^ ID[3]`, of each of the last 16 branches.
 
 | Table | Entries × bits | Index | Content, initial value |
 | --- | --- | --- | --- |
 | BC | 64 × (2 + 2) | `fold(ID, 6)` | bimodal counter (01) and chooser counter (01), separately writable |
 | G | 128 × 2 | `fold(ID, 7) ^ (h[3:0] << 3)` | gshare counter (01) |
-| T1, T2, T3 | 16 × (3 + 7 + 2) each, history lengths L = 4, 9, 20 | `fold(ID, 4) ^ fold(h[L-1:0], 4)` | `{u, tag, ctr}` = `{0, 0, 3}`; tag = `fold(ID >> 4, 7) ^ fold(h[L-1:0], 7) ^ (fold(h[L-1:0], 6) << 1)` |
+| W0 | 32 × 5 | `ID[4:0] ^ ID[7:5]` | signed weight; 0 |
+| W1, W2, W3 | 32 × 5 each, history lengths L = 8, 9, 20 | `ID[4:0] ^ ID[7:5] ^ fold(h[L-1:0], 5) ^ (fold(h[L-1:0], 4) << 1) ^ rot2(fold(p[min(L,16)-1:0], 5))` | signed weight; −1, 0, −1 |
 
-Small registers: use-alternate counter (4 bits, starts at 8), allocation LFSR (8 bits, taps 0xB8, starts at 0xE1),
-committed and speculative history (20 bits each).
+`rot2` rotates five bits left by two. Small registers: threshold θ (6 bits, starts at 12), its adaptation counter
+(4 bits, signed, starts at 0), committed and speculative outcome history (21 bits each), committed and speculative
+path history (16 bits each).
 
 **Reference predictors (FR-07).** bimodal = BC counter MSB. gshare = G counter MSB. tournament = gshare if the
 chooser MSB is 1, else bimodal. They train on every resolved branch by the classic rules: both counters move toward
-the outcome; the chooser moves toward the component that was right when the two disagree.
+the outcome; the chooser moves toward the component that was right when the two disagree. A reference is confident
+when the counter it used is saturated (0 or 3).
 
-**Default predictor.** A table *hits* when its stored tag equals the computed tag. The longest-history hit is the
-*provider*, the next one the *alternate*; without a second hit the alternate is the tournament, and without any hit
-the prediction is the tournament. The provider is *weak* when its counter is 3 or 4 and its `u` is 0. Prediction =
-alternate if the provider is weak and the use-alternate counter is 8 or more, else the provider's counter MSB.
-**Confidence** (FR-11) = high when the provider's counter is saturated (0 or 7) and was used, or, without a
-provider, when the counter the tournament used is saturated.
+**Default predictor: a hashed perceptron.** With the features of CTRL[15:12] as after reset:
 
-**Training** at resolve, from the committed lookup of that branch and the outcome only:
+```
+neg_i = h[L_i]                      for i = 1..3 (the outcome just before the table's history segment); neg_0 = 0
+v_i   = neg_i ? -(2 w_i + 1) : (2 w_i + 1)          = 2 (w_i ^ neg_i) + 1: the stored bits read complemented
+sum   = v_0 + v_1 + v_2 + v_3 + 2 (2 bim - 3) + 4 (2 gsh - 3) + (tournament ? +4 : -4)
+prediction = (sum >= 0)            confidence (FR-11) = |sum| > theta
+```
 
-1. Provider: counter toward the outcome. If provider and alternate predictions differ: `u` up if the provider was
-   right, down if wrong; and, if the provider was weak, the use-alternate counter up if the alternate was right,
-   down if wrong. If the provider was weak and the alternate is a tagged table, its counter also moves.
-2. If the default prediction (as recomputed at resolve) was wrong and a longer table exists: among the longer
-   tables whose entry has `u` = 0, one is chosen (the LFSR steps; candidate k in increasing order is taken where k is
-   the number of leading ones of the LFSR, capped at the last) and overwritten with the computed tag, counter 4 or 3
-   by outcome, `u` = 0. If none is free, the `u` of each longer table's entry is decremented.
-3. The reference tables train as above.
+**Training** at resolve, from the committed lookup of that branch (committed outcome and path history) and the
+outcome only: if the prediction recomputed at resolve was wrong, or `|sum| <= theta`, every `w_i` moves one step
+(up if `outcome != neg_i`, else down), saturating at −16 and +15. Then the threshold adapts: on a wrong prediction
+the adaptation counter goes up, and when it is at +7 it returns to 0 and θ goes up by one (to at most 63); on a right
+prediction with `|sum| <= theta` it goes down, and at −8 it returns to 0 and θ goes down by one (to at least 1). The
+reference tables train as above. The speculative path history is repaired with the outcome history (FR-04).
+
+**Features (CTRL[15:12]).** `[12]` = 0 removes the three reference terms from the sum. `[13]` = 0 sets every
+`neg_i` to 0. `[14]` = 0 stops the threshold adapting (θ stays; it is writable through raw space 7). `[15]` = 1 is
+the experiment *binarised inference*: the prediction is the sign of the same sum with every `v_i` replaced by its
+sign (±1); training and confidence still use the full sum. All 16 combinations are in the golden model and are
+verified alike. **Safe mode:** `[15:12] = 0`, the plain hashed perceptron; or any reference predictor driving
+(CTRL[2:0]), which shares no logic with the sum.
 
 **Sizes of the references, and why.** Bimodal + chooser 256 bits, gshare 256 bits: the reference tournament has 512
-bits, the default predictor adds 576. Each reference is somewhat below its own saturation (a 128-entry bimodal alone
-would score 1.0 point more, a 4096-entry one 1.9 more); making them larger does not help the default predictor
-(the best candidates with a 128-entry bimodal score the same) and costs area the tagged tables use better. The
-gshare history of 4 bits is the best history for a 128-entry tournament on the benchmark set. Nothing was shrunk to
-widen the gap: with these very tables the default predictor is 2.3 points more accurate than the tournament.
+bits, the default predictor adds 640. Each reference is somewhat below its own saturation (a 128-entry bimodal alone
+would score 1.0 point more, a 4096-entry one 1.9 more); the gshare history of 4 bits is the best history for a
+128-entry tournament on the benchmark set. Nothing was shrunk to widen the gap (docs/exploration.md).
 
-**Identifier width (IR-05).** 10 bits: accuracy is flat from 6 to 16 bits (91.16, 91.29, 91.24, 91.28, 91.27 % at
-6, 8, 10, 12, 16). No static hint bit: agree-coded variants gain or lose under 0.05 point.
+## 8. Budget (EX-04)
 
-## 8. Budget (EX-04), re-baselined at G1
-
-| Block | Synthesised area, µm² | Basis |
-| --- | --- | --- |
-| Tables: BC 5,400; G 5,400; T1–T3 3 × 4,080 | 23,000 | **(VERIFIED)** Yosys, flow's cell exclusions |
-| Sequencer, queue, histories, statistics, raw access (`bpx_core`) | 16,000 (13,000 with drive-strength-1 gates allowed) | **(VERIFIED)** Yosys |
-| Predictor logic: hashes, compare, training (`bpx_pred`, folds) | 9,000 (7,500) | **(VERIFIED)** Yosys |
-| Statistics snapshot latches | 1,300 | **(VERIFIED)** Yosys |
-| Control port, synchronisers | 2,800 (2,400) | **(VERIFIED)** Yosys |
-| **Total** | **57,000 (49,900)** | |
-| Routable, demonstrated | 48,900 synthesised → 82–84 % utilisation, DRC/LVS/antenna clean | **(VERIFIED)** probes p5 and the repository probe, local and CI |
-
-The design fits only with drive-strength-1 gates allowed in synthesis (AL-02: `SYNTH_EXCLUDED_CELL_FILE`), which is
-being proven in a trial build; the fallback, if that fails, is to cut logic (statistics width, raw-access paths) or
-one tagged table. Critical path budget: one clock for hash + table read + compare + select, about 12–13 ns at the
-slow corner by the probe's cell delays **(ESTIMATED)**, so 50 MHz is the target and 66 MHz is not promised.
+The area by block, the build settings and the measured utilisation are in docs/area.md; the clock and the critical
+path in docs/timing.md. In short **(VERIFIED there)**: the perceptron design builds clean with all checks at zero;
+the sum of the perceptron in the predict cycle sets the clock period at 30 ns (33 MHz) at the slow corner, with the
+acknowledge still at the third clock: 90 ns from request to answer.
 
 ## 9. The U1 CPU: the contract the FPGA team builds (FR-03, VR-06)
 
@@ -357,4 +358,9 @@ Results are reported for this contract in both adapter modes (docs/cosim.md: one
 docs/cosim_dual.md: rule 7) and, as sensitivity from the exploration model, without the BTB (every branch asks in
 ID) and with the resolve one and two stages later (docs/exploration.md).
 
-Host-side identifier fold (IR-05): `ID = fold10(PC >> 2)`, the XOR of consecutive 10-bit slices of `PC[31:2]`.
+Host-side identifier fold (IR-05): `ID = fold8(PC >> 2)`, the XOR of consecutive 8-bit slices of `PC[31:2]`.
+
+**Clock, reset and project selection on the bench.** The FPGA can drive the chip's `clk` and `rst_n` directly once
+the demo board's firmware has released them (`RPMode.ASIC_MANUAL_INPUTS`); the project selection must be done, and
+held, by the board's microcontroller. Details, sources and what is still unknown: docs/bringup.md 6. The FPGA must
+leave `uio[0]` and `uio[1]` undriven: they are outputs of the chip.

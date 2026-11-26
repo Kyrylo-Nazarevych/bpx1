@@ -4,7 +4,7 @@
 # prove    k-induction: the same assertions from any state that satisfies them (unbounded); small tables
 # cover    a trace for each operation, a full queue, a misprediction with a full queue and its repair
 # nowait   legal host, silent control port: which requests can never be made to wait (docs/coverage.md)
-# bmcfull  as bmc with the chip's table sizes (64/128/16 entries), to a smaller depth
+# bmcfull  as bmc with the chip's table sizes (64/128/32 entries), to a smaller depth
 [tasks]
 bmc small
 prove small
@@ -28,7 +28,7 @@ bmcfull: depth 30
 smtbmc boolector
 
 [script]
-bmcfull: read -formal -D FORMAL -D BPX_BEHAV -D FV_QUIET=20 -D FV_LGB=6 -D FV_LGG=7 -D FV_LGT=4 bpx_ltab.v bpx_pred.v bpx_core.v bpx_fv_top.v
+bmcfull: read -formal -D FORMAL -D BPX_BEHAV -D FV_QUIET=20 -D FV_LGB=6 -D FV_LGG=7 -D FV_LGT=5 bpx_ltab.v bpx_pred.v bpx_core.v bpx_fv_top.v
 nowait: read -formal -D FORMAL -D BPX_BEHAV -D FV_QUIET=20 -D FV_NOSPI -D FV_LGB=3 -D FV_LGG=4 -D FV_LGT=3 bpx_ltab.v bpx_pred.v bpx_core.v bpx_fv_top.v
 small: read -formal -D FORMAL -D BPX_BEHAV -D FV_QUIET=20 -D FV_LGB=3 -D FV_LGG=4 -D FV_LGT=3 bpx_ltab.v bpx_pred.v bpx_core.v bpx_fv_top.v
 prep -top bpx_fv_top

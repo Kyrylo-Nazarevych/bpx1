@@ -51,6 +51,7 @@ def main():
         e["ok"] = False
         e["seen"] = []
     n, nxt, active, bad, shown = 0, 0, [], 0, 0
+    raw_addr = 0
 
     def evaluate():
         nonlocal nxt, active, bad, shown
@@ -81,8 +82,8 @@ def main():
                 e["ok"] = e["ok"] or v == e["v"]
                 e["seen"].append(v)
             elif e["kind"] == "id":
-                e["ok"] = e["ok"] or (e["w0"] == 0xB101 and e["w1"] == (m.drive | (8 if m.frozen else 0)))
-                e["seen"].append(m.drive | (8 if m.frozen else 0))
+                e["ok"] = e["ok"] or (e["w0"] == 0xB101 and e["w1"] == m.ctrl_word())
+                e["seen"].append(m.ctrl_word())
             else:
                 e["seen"].append((errs[0], flags[0]))
         active = keep
@@ -100,13 +101,17 @@ def main():
             m.clear_stats()
             n += 1
         elif t[0] == "W" and t[1] == "1":
-            m.drive, m.frozen = int(t[2]) & 7, bool(int(t[2]) & 8)
+            m.drive, m.frozen, m.feat = int(t[2]) & 7, bool(int(t[2]) & 8), (int(t[2]) >> 12) & 15
+        elif t[0] == "W" and t[1] == "15":
+            raw_addr = int(t[2])
+        elif t[0] == "W" and t[1] == "16":
+            m.raw_write((raw_addr >> 8) & 15, raw_addr & 127, int(t[2]), (raw_addr >> 12) & 3)
         elif t[0] == "W" and t[1] == "2":
             if int(t[2]) != 2:
                 sys.exit("conc_check: only 'clear predictors' is supported among the commands")
             m.clear_predictors()
         elif t[0] == "X" and t[1] == "W":
-            m.bim[int(t[2])], m.cho[int(t[2])] = int(t[3]) & 3, int(t[3]) >> 2
+            m.raw_write(0, int(t[2]), int(t[3]))
         else:
             continue
         evaluate()

@@ -4,9 +4,9 @@
 module tt_um_kyrylo_nazarevych_bpx1 (
     input  wire [7:0] ui_in,    // ID[7:0]
     output wire [7:0] uo_out,   // {MISO, DBG1, DBG0, READY, FULL, CONF, PRED, ACK}
-    input  wire [7:0] uio_in,   // {REQ, MOSI, SCK, CSn, OP[1:0], ID[9:8]}
-    output wire [7:0] uio_out,  // unused: all bidirectional pins are inputs
-    output wire [7:0] uio_oe,   // always 0
+    input  wire [7:0] uio_in,   // {REQ, MOSI, SCK, CSn, OP[1:0], -, -}
+    output wire [7:0] uio_out,  // {0, 0, 0, 0, 0, 0, PGSH, PBIM}
+    output wire [7:0] uio_oe,   // always 8'h03
     input  wire       ena,
     input  wire       clk,
     input  wire       rst_n

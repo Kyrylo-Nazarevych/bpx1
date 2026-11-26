@@ -66,7 +66,7 @@ static void bg_xfer(int addr, bool wr, const u32* v, int n) {
 static void tick() { bg_tick(); top->clk = 1; top->eval(); top->clk = 0; top->eval(); chip_cycles++; }
 
 static u32 fold(u64 v, int inb, int outb) { v &= (inb >= 64 ? ~0ull : ((1ull << inb) - 1)); u32 r = 0; while (v) { r ^= (u32)(v & ((1u << outb) - 1)); v >>= outb; } return r; }
-static u32 fold_id(u32 pc) { return fold((u64)(pc >> 2), 30, 10); }
+static u32 fold_id(u32 pc) { return fold((u64)(pc >> 2), 30, 8); }
 
 // ------------------------------------------------------------------ pins
 static int K = 8;
@@ -81,7 +81,7 @@ static int used = 0, used_max = 0;
 static int request(int op, int id, u64 t) {
     if (t != last_t) { if (last_t != ~0ull) for (; used < K; used++) tick(); used = 0; last_t = t; }
     else { tick(); used++; pairs++; }
-    uio = (uio & 0x70) | ((id >> 8) & 3) | ((op & 3) << 2);
+    uio = (uio & 0x70) | ((op & 3) << 2);
     int ack0 = top->uo_out & 1;
     req ^= 1;
     drive(id & 0xff);
@@ -192,7 +192,7 @@ static int rand_play(const char* path, const char* latpath, const char* clpath) 
             int op, id, exp, gap, setup;
             if (fscanf(f, "%d %d %d %d %d", &op, &id, &exp, &gap, &setup) != 5) return 2;
             for (int k = 0; k < gap; k++) tick();
-            uio = (uio & 0x70) | ((id >> 8) & 3) | ((op & 3) << 2);
+            uio = (uio & 0x70) | ((op & 3) << 2);
             drive(id & 0xff);
             for (int k = 0; k < setup; k++) tick();
             int ack0 = top->uo_out & 1;
@@ -201,6 +201,8 @@ static int rand_play(const char* path, const char* latpath, const char* clpath) 
             while ((top->uo_out & 1) == ack0) { tick(); if (++n > 200) { fprintf(stderr, "line %llu: no acknowledge\n", (unsigned long long)line); return 3; } }
             n_acked++;
             int got = ((top->uo_out >> 1) & 1) | (((top->uo_out >> 2) & 1) << 1);
+            if (exp & 64)                                    // an accepted predict: the four predictions on the pins
+                got |= (((top->uo_out >> 5) & 1) | ((top->uio_out & 3) << 1) | (((top->uo_out >> 6) & 1) << 3)) << 2 | 64;
             if (op != 0 && got != exp) { if (!bad) fprintf(stderr, "line %llu: op %d id %d reply %d, model %d\n", (unsigned long long)line, op, id, got, exp); bad++; }
             if (lf) fputc(n > 255 ? 255 : n, lf);
             nr++;
@@ -265,7 +267,8 @@ int main(int argc, char** argv) {
     top->rst_n = 1;
     for (int i = 0; i < 40 && !((top->uo_out >> 4) & 1); i++) tick();
     if (!((top->uo_out >> 4) & 1)) { fprintf(stderr, "not ready\n"); return 3; }
-    { u32 c = drv; spi(0x01, true, &c, 1); }
+    // CTRL: the driving predictor; DBG selections as after reset; features of the default predictor (BPX_FEAT, default 7)
+    { int feat = getenv("BPX_FEAT") ? atoi(getenv("BPX_FEAT")) : 7; u32 c = drv | 0x0DA0 | ((feat & 15) << 12); spi(0x01, true, &c, 1); }
 
     if (getenv("BPX_SEQ")) {            // one branch in flight: every record is one PREDICT+RESOLVE request (U2)
         u64 n = 0, wrong = 0, since = 0;

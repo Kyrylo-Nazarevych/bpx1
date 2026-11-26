@@ -39,7 +39,7 @@ class Host:
     async def request(self, op, ident):
         await Timer(self.rng.randint(100, 3000 * CLK_NS), unit="ps")           # anywhere within three clock periods
         self.ui = ident & 0xFF
-        self.uio = (self.uio & 0x70) | ((ident >> 8) & 3) | ((op & 3) << 2)
+        self.uio = (self.uio & 0x70) | ((op & 3) << 2)
         self._drive()
         if self.rng.random() < 0.5:
             await Timer(self.rng.randint(100, 1000 * CLK_NS), unit="ps")
@@ -53,6 +53,8 @@ class Host:
             n += 1
             assert n < 64, "no acknowledge within 64 clocks"
         v = int(self.dut.uo_out.value)
+        u = int(self.dut.uio_out.value)
+        self.pins = [(v >> 5) & 1, u & 1, (u >> 1) & 1, (v >> 6) & 1]       # DBG0, PBIM, PGSH, DBG1
         return (v >> 1) & 1, (v >> 2) & 1, n
 
     async def _spi_bits(self, value, nbits):
@@ -140,16 +142,16 @@ async def compare_state(h, m):
     assert [(x >> 2) & 3 for x in bc] == st["cho"], "chooser table differs"
     g = await h.dump(1, c.NG)
     assert [x & 3 for x in g] == st["gsh"], "gshare table differs"
-    for i, (e, tb, _) in enumerate(c.tagged):
-        t = await h.dump(2 + i, e)
-        exp = [(u << (tb + 3)) | (tag << 3) | ctr for tag, ctr, u in st["tagged"][i]]
-        assert t == exp, f"tagged table {i} differs: first mismatch at {next(k for k in range(e) if t[k] != exp[k])}"
-    r = await h.dump(7, 5)
+    for i, (e, _) in enumerate(c.weights):
+        t = await h.dump(8 + i, e)
+        exp = [m.raw(8 + i, k) for k in range(e)]
+        assert t == exp, f"weight table {i} differs: first mismatch at {next(k for k in range(e) if t[k] != exp[k])}"
+    r = await h.dump(7, 9)
     ch, sh, misc = r[0] | (r[1] << 12), r[2] | (r[3] << 12), r[4]
+    assert r[5:9] == [m.raw(7, a) for a in range(5, 9)], f"path histories {r[5:9]} differ from the model"
     assert ch == st["ch"], f"committed history {ch:x} != {st['ch']:x}"
     assert sh == st["sh"], f"speculative history {sh:x} != {st['sh']:x}"
-    assert misc & 15 == st["ua"], "use-alternate counter differs"
-    assert misc >> 4 == st["lfsr"], "allocation LFSR differs"
+    assert misc == m.raw(7, 4), f"threshold and adaptation counter {misc:x} != {m.raw(7, 4):x}"
 
 
 async def compare_stats(h, m):
@@ -173,8 +175,8 @@ async def random_ops_against_model(dut):
     m = bpx1.Bpx1()
     assert (await h.spi(0x00, n=1))[0] == 0xB101
     hist, lat = {}, {}
-    ids = [rng.randrange(1024) for _ in range(40)]
-    drive = 0
+    NID = 1 << m.cfg.W
+    ids = [rng.randrange(NID) for _ in range(40)]
     for n in range(OPS):
         r = rng.random()
         ident = rng.choice(ids)
@@ -186,22 +188,24 @@ async def random_ops_against_model(dut):
             tgt = head if m.queue else ident
             op, arg = (bpx1.OP_PREDICT_RESOLVE_T if outcome(tgt, hist) else bpx1.OP_PREDICT_RESOLVE_NT), ident
         elif r < 0.93:
-            op, arg = bpx1.OP_SPECIAL, (bpx1.SUB_RESOLVE_T if outcome(head, hist) else bpx1.SUB_RESOLVE_NT) | (rng.randrange(256) << 2)
+            op, arg = bpx1.OP_SPECIAL, (bpx1.SUB_RESOLVE_T if outcome(head, hist) else bpx1.SUB_RESOLVE_NT) | (rng.randrange(NID >> 2) << 2)
         elif r < 0.96:
-            op, arg = bpx1.OP_SPECIAL, bpx1.SUB_FLUSH | (rng.randrange(256) << 2)
+            op, arg = bpx1.OP_SPECIAL, bpx1.SUB_FLUSH | (rng.randrange(NID >> 2) << 2)
         elif r < 0.98:
-            op, arg = bpx1.OP_SPECIAL, bpx1.SUB_NOP | (rng.randrange(256) << 2)
+            op, arg = bpx1.OP_SPECIAL, bpx1.SUB_NOP | (rng.randrange(NID >> 2) << 2)
         else:
-            drive = rng.choice([0, 0, 1, 2, 3, 4])
-            freeze = 1 if rng.random() < 0.2 else 0
-            await h.spi(0x01, [drive | (freeze << 3)])
-            m.drive, m.frozen = drive, bool(freeze)
+            m.drive = rng.choice([0, 0, 1, 2, 3, 4])
+            m.frozen = rng.random() < 0.2
+            m.feat = rng.choice([m.cfg.FEAT] * 4 + list(range(16)))
+            await h.spi(0x01, [m.ctrl_word()])
             continue
         exp = m.request(op, arg)
         pred, conf, cyc = await h.request(op, arg)
         lat[cyc] = lat.get(cyc, 0) + 1
         if op != bpx1.OP_SPECIAL:
             assert (pred, conf) == (exp.pred, exp.conf), f"op {n}: op={op} id={arg:#x} got pred={pred} conf={conf}, model pred={exp.pred} conf={exp.conf} refused={exp.refused}"
+            if not exp.refused & bpx1.ERR_PREDICT_FULL:      # the four predictions on the pins
+                assert h.pins == m.last_preds, f"op {n}: prediction pins {h.pins}, model {m.last_preds}"
         if n % 1000 == 999:
             await compare_stats(h, m)
     await compare_stats(h, m)
@@ -243,18 +247,22 @@ async def raw_access_write(dut):
     assert await rd(0, 4) == 0x5 and await rd(0, 6) == 0x5, "neighbours changed"
     await wr(1, 100, 1, 0x2)
     assert await rd(1, 100) == 0x2 and await rd(1, 99) == 0x1 and await rd(1, 101) == 0x1, "gshare entry"
-    for t in (2, 3, 4):
-        await wr(t, 9, 3, 0xABC)
-        assert await rd(t, 9) == 0xABC, f"tagged table {t - 2}: whole entry"
-        await wr(t, 9, 1, 0x155)
-        assert await rd(t, 9) == 0x955, f"tagged table {t - 2}: tag and counter only"
-        await wr(t, 9, 2, 0x400)
-        assert await rd(t, 9) == 0x555, f"tagged table {t - 2}: useful bits only"
-        assert await rd(t, 8) == 0x003 and await rd(t, 10) == 0x003, f"tagged table {t - 2}: neighbours changed"
-    await wr(7, 4, 0, 0x5A3)
-    assert await rd(7, 4) == 0x5A3, "use-alternate counter and allocation register"
+    m0 = bpx1.Bpx1()
+    wm = (1 << m0.cfg.CB) - 1
+    for i in range(len(m0.cfg.weights)):
+        t = 8 + i
+        await wr(t, 9, 1, 0xABC & wm)
+        assert await rd(t, 9) == 0xABC & wm, f"weight table {i}: entry"
+        await wr(t, 9, 1, 0x155 & wm)
+        assert await rd(t, 9) == 0x155 & wm, f"weight table {i}: entry rewritten"
+        await wr(t, 9, 2, 0x000)
+        assert await rd(t, 9) == 0x155 & wm, f"weight table {i}: a write with the field disabled changed the entry"
+        assert await rd(t, 8) == m0.raw(t, 8) and await rd(t, 10) == m0.raw(t, 10), f"weight table {i}: neighbours changed"
+    await wr(7, 4, 0, 0x2A3)
+    assert await rd(7, 4) == 0x2A3, "threshold and adaptation counter"
+    assert (await h.spi(0x01, n=1))[0] == m0.ctrl_word(), "CTRL after reset"
     # the bimodal predictor uses the written counter: entry 5 is now strongly taken, entry 4 still weakly not-taken
-    await h.spi(0x01, [0x0001])
+    await h.spi(0x01, [0x0DA1])
     pred, _, _ = await h.request(bpx1.OP_PREDICT, 5)
     assert pred == 1, "written bimodal counter not used"
     pred, _, _ = await h.request(bpx1.OP_PREDICT, 4)
@@ -281,6 +289,7 @@ async def trace_replay(dut):
     wrong = 0
     for n, (ident, taken) in enumerate(trace[:OPS]):
         taken = 1 if taken else 0
+        ident &= (1 << m.cfg.W) - 1
         exp = m.predict_resolve(ident, taken)
         pred, conf, _ = await h.request(bpx1.OP_PREDICT_RESOLVE_T if taken else bpx1.OP_PREDICT_RESOLVE_NT, ident)
         assert (pred, conf) == (exp.pred, exp.conf), f"record {n}: id={ident:#x} got pred={pred} conf={conf}, model pred={exp.pred} conf={exp.conf}"

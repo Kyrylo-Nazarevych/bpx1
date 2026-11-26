@@ -4,9 +4,10 @@
   randgen.py <operations> <seed> <out.ops> <out.meta> [conc]
 
 out.ops is played against the RTL by `cosim --rand` (cosim/cosim.cpp), one line per step:
-  R op id expected gap setup     a request; expected = PRED | CONF<<1; gap = idle clocks before it; setup = clocks
+  R op id expected gap setup     a request; expected = PRED | CONF<<1 [| the four prediction pins <<2 | 64 for an
+                                 accepted predict]; gap = idle clocks before it; setup = clocks
                                  ID/OP are placed before REQ toggles
-  W addr value                   a control-port write (CTRL or CMD)
+  W addr value                   a control-port write (CTRL, CMD, or RAW_ADDR and RAW_DATA for a raw write)
   S / C  resolved m0 m1 m2 m3 errors flags queue     snapshot (S) or snapshot-and-clear (C), then compare
   D space count w...             read `count` raw words of a state space and compare (FR-10)
 With `conc` the control port works while the requests run (FR-10 during a live run): no foreground statistics
@@ -43,34 +44,18 @@ def outcome(ident, hist):
     return (ident * 2654435761 >> (c % 11)) & 1
 
 
-class Cov(bpx1.Bpx1):
-    """The golden model, recording what each training step did."""
-
-    def _train(self, ident, taken):
-        L = self._lookup(ident, self.ch)
-        nt = len(self.cfg.tagged)
-        before = [list(self.tt[j][L.idx[j]]) for j in range(nt)]
-        lf = self.lfsr
-        super()._train(ident, taken)
-        alloc, udec = -1, 0
-        if L.p_def != taken and L.prov < nt - 1:
-            for j in range(L.prov + 1, nt):
-                if before[j][2] == 0 and self.tt[j][L.idx[j]] != before[j]:
-                    alloc = j
-            if alloc < 0 and self.lfsr == lf:
-                udec = 1
-        self.tr = (L.prov, alloc, udec, 1 if L.weak else 0, 1 if L.alt >= 0 else 0)
-
-
 def main():
     N, seed = int(sys.argv[1]), int(sys.argv[2])
     conc = len(sys.argv) > 5 and sys.argv[5] == "conc"
     rng = random.Random(seed)
     ops = open(sys.argv[3], "w")
     meta = open(sys.argv[4], "w")
-    m = Cov()
+    m = bpx1.Bpx1()
+    cfg = m.cfg
+    NID = 1 << cfg.W
     hist = {}
-    ids = [rng.randrange(1024) for _ in range(48)]
+    ids = [rng.randrange(NID) for _ in range(48)]
+    spaces = [(0, cfg.NB), (1, cfg.NG)] + [(8 + i, e) for i, (e, _) in enumerate(cfg.weights)]
 
     def stat_line(kind):
         s = m.stats()
@@ -80,45 +65,48 @@ def main():
             m.n_res, m.mis = 0, [0, 0, 0, 0]
 
     def dump():
-        c, st = m.cfg, m.state()
-        ops.write(f"D 0 {c.NB} " + " ".join(str(b | (ch << 2)) for b, ch in zip(st["bim"], st["cho"])) + "\n")
-        ops.write(f"D 1 {c.NG} " + " ".join(map(str, st["gsh"])) + "\n")
-        for i, (e, tb, _) in enumerate(c.tagged):
-            ops.write(f"D {2 + i} {e} " + " ".join(str((u << (tb + 3)) | (tag << 3) | ctr) for tag, ctr, u in st["tagged"][i]) + "\n")
-        ops.write(f"D 7 5 {st['ch'] & 0xfff} {st['ch'] >> 12} {st['sh'] & 0xfff} {st['sh'] >> 12} {st['ua'] | (st['lfsr'] << 4)}\n")
+        for sp, n in spaces:
+            ops.write(f"D {sp} {n} " + " ".join(str(m.raw(sp, a)) for a in range(n)) + "\n")
+        ops.write("D 7 9 " + " ".join(str(m.raw(7, a)) for a in range(9)) + "\n")
 
     def req(op, arg, fast):
         depth = len(m.queue)
         head = m.queue[0] if m.queue else None
-        ua_hi = m.ua >= m.ua_mid
-        Lp = m._lookup(arg, m.sh) if op != bpx1.OP_SPECIAL else None
-        m.tr = (-2, -1, 0, 0, 0)
-        frozen, drive = m.frozen, m.drive
+        Lp = m._lookup(arg, m.sh, m.psh) if op != bpx1.OP_SPECIAL else None
+        m.last_train = None
+        frozen, drive, feat = m.frozen, m.drive, m.feat
         rep = m.request(op, arg)
         sub = arg & 3
         cls = 0 if op == bpx1.OP_PREDICT else 1 if op != bpx1.OP_SPECIAL else (4 if sub == 0 else 3 if sub == 1 else 2)
         misp, squash, rfirst = -1, -1, 0
         if cls in (1, 2) and not rep.refused:
             tk = (op & 1) if cls == 1 else (sub & 1)
-            if cls == 1 and depth < m.cfg.DEPTH and depth == 0:
+            if cls == 1 and depth < cfg.DEPTH and depth == 0:
                 pd = rep.pred                      # resolves the branch it has just predicted
             else:
                 pd = head["pdrv"]
             misp = 1 if pd != tk else 0
-            rfirst = 1 if cls == 1 and depth >= m.cfg.DEPTH else 0
+            rfirst = 1 if cls == 1 and depth >= cfg.DEPTH else 0
             if misp:
                 squash = (depth - 1) if (cls == 2 or rfirst) else depth
                 if cls == 1 and depth == 0:
                     squash = 0
-        prov = Lp.prov if (Lp is not None and not (rep.refused & bpx1.ERR_PREDICT_FULL)) else -2
-        usealt = 1 if (prov >= 0 and Lp.weak and ua_hi) else 0
-        if rfirst:
-            prov, usealt = -3, 0                   # the lookup ran after the resolve: not reconstructed here
+        lowp = -1
+        if Lp is not None and not (rep.refused & bpx1.ERR_PREDICT_FULL) and not rfirst:
+            lowp = 0 if Lp.conf[0] else 1          # the default predictor's margin at the predict
+        t = m.last_train
+        if t is None:
+            tr = (-1, 0, 0, 0, 0)
+        else:
+            tr = ((2 if t["miss"] else 0) + (1 if t["low"] else 0), 1 if t["neg"] else 0, 1 if t["sat_hi"] else 0, 1 if t["sat_lo"] else 0, t["th"])
         gap = 0 if fast else rng.choice([0, 0, 0, 1, 1, 2, 3, 5, 9])
         setup = rng.choice([0, 0, 1, 2])
-        ops.write(f"R {op} {arg} {rep.pred | (rep.conf << 1)} {gap} {setup}\n")
-        meta.write(f"{cls} {depth} {misp} {rep.refused} {drive} {1 if frozen else 0} {rep.pred} {rep.conf} {prov} {usealt} {squash} "
-                   f"{m.tr[0]} {m.tr[1]} {m.tr[2]} {rfirst} {gap} {setup} {m.tr[3]} {m.tr[4]}\n")
+        exp = rep.pred | (rep.conf << 1)
+        if op != bpx1.OP_SPECIAL and not rep.refused & bpx1.ERR_PREDICT_FULL:
+            exp |= 64 | sum(b << (2 + k) for k, b in enumerate(m.last_preds))   # DBG0, PBIM, PGSH, DBG1
+        ops.write(f"R {op} {arg} {exp} {gap} {setup}\n")
+        meta.write(f"{cls} {depth} {misp} {rep.refused} {drive} {1 if frozen else 0} {rep.pred} {rep.conf} {feat} {lowp} {squash} "
+                   f"{rfirst} {gap} {setup} {tr[0]} {tr[1]} {tr[2]} {tr[3]} {tr[4]}\n")
 
     def drain():
         while m.queue:
@@ -135,13 +123,14 @@ def main():
             if rng.random() < 0.02:
                 if conc:
                     ops.write("J\n")
-                ids = [rng.randrange(1024) for _ in range(rng.choice([8, 48, 200]))]
+                ids = [rng.randrange(NID) for _ in range(rng.choice([8, 48, 200]))]
         left -= 1
         r = rng.random()
         if r < 0.0015:
             m.drive = rng.choice([0, 0, 0, 1, 2, 3, 4])
             m.frozen = rng.random() < 0.15
-            ops.write(f"W 1 {m.drive | (8 if m.frozen else 0)}\n")
+            m.feat = rng.choice([cfg.FEAT] * 6 + list(range(16)))
+            ops.write(f"W 1 {m.ctrl_word()}\n")
             continue
         if conc and r < 0.0025:
             continue
@@ -157,36 +146,39 @@ def main():
             ops.write("W 2 2\n")                         # clear predictors
             m.clear_predictors()
             continue
-        if conc and r < 0.00283:
+        if r < 0.0029:                                   # raw write of the threshold and its adaptation counter
+            v = rng.choice([0, 1, 2, 5, 12, 30, 62, 63]) << 4 | rng.choice([0, 6, 7, 8, 9, 15])
+            m.raw_write(7, 4, v)
+            ops.write(f"W 15 {0x3704}\nW 16 {v}\n")
+            continue
+        if conc and r < 0.00305:
             continue
         if conc and r < 0.025:
-            c = m.cfg
             k = rng.choice("SSCCDDDDDWWI")
             if k == "D":
-                sp = rng.choice([0, 0, 1, 1, 2, 3, 4, 7])
+                sp, size = rng.choice(spaces + [(0, cfg.NB), (7, 9)])
                 if sp == 7:
-                    a, cnt = rng.choice([(0, 1), (0, 2), (1, 1), (4, 1)])
+                    a, cnt = rng.choice([(0, 1), (0, 2), (1, 1), (4, 1), (4, 3), (5, 2), (6, 1)])
                 else:
-                    size = c.NB if sp == 0 else c.NG if sp == 1 else c.tagged[sp - 2][0]
                     cnt = rng.randint(1, 6)
                     a = m._lookup(rng.choice(ids), m.ch).bi if (sp == 0 and rng.random() < 0.7) else rng.randrange(size)
                     a = min(a, size - cnt)
                 ops.write(f"X D {sp} {a} {cnt}\n")
             elif k == "W":
                 used = {m._lookup(i, 0).bi for i in ids} | {m._lookup(q["id"], 0).bi for q in m.queue}
-                free = [a for a in range(c.NB) if a not in used]
+                free = [a for a in range(cfg.NB) if a not in used]
                 if free:
                     a, v = rng.choice(free), rng.randrange(16)
-                    m.bim[a], m.cho[a] = v & 3, v >> 2
+                    m.raw_write(0, a, v)
                     ops.write(f"X W {a} {v}\n")
             else:
                 ops.write(f"X {k}\n")
             continue
-        if r < 0.0028 and clear_ok:
+        if r < 0.00295 and clear_ok:
             ops.write("W 2 4\n")                         # clear statistics
             m.clear_stats()
             continue
-        if r < 0.00283 and clear_ok:
+        if r < 0.00298 and clear_ok:
             ops.write("W 2 1\n")                         # soft reset
             m.reset()
             continue
@@ -196,19 +188,19 @@ def main():
         r = rng.random()
         pw, cw, rw = [(0.36, 0.32, 0.25), (0.62, 0.15, 0.16), (0.03, 0.90, 0.05), (0.36, 0.32, 0.25)][mode]
         fast = mode == 3 or rng.random() < 0.2
+        hi = rng.randrange(NID >> 2) << 2
         if r < pw:
             req(bpx1.OP_PREDICT, ident, fast)
         elif r < pw + cw:
-            full = len(m.queue) >= m.cfg.DEPTH
             tgt = head if head is not None else ident
             req(bpx1.OP_PREDICT_RESOLVE_T if outcome(tgt, hist) else bpx1.OP_PREDICT_RESOLVE_NT, ident, fast)
         elif r < pw + cw + rw:
             tk = outcome(head if head is not None else ident, hist)
-            req(bpx1.OP_SPECIAL, (bpx1.SUB_RESOLVE_T if tk else bpx1.SUB_RESOLVE_NT) | (rng.randrange(256) << 2), fast)
+            req(bpx1.OP_SPECIAL, (bpx1.SUB_RESOLVE_T if tk else bpx1.SUB_RESOLVE_NT) | hi, fast)
         elif r < pw + cw + rw + 0.6 * (1 - pw - cw - rw):
-            req(bpx1.OP_SPECIAL, bpx1.SUB_FLUSH | (rng.randrange(256) << 2), fast)
+            req(bpx1.OP_SPECIAL, bpx1.SUB_FLUSH | hi, fast)
         else:
-            req(bpx1.OP_SPECIAL, bpx1.SUB_NOP | (rng.randrange(256) << 2), fast)
+            req(bpx1.OP_SPECIAL, bpx1.SUB_NOP | hi, fast)
     if conc:
         ops.write("J\n")
         drain()

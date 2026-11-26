@@ -28,7 +28,8 @@ is an assertion of the formal task `nowait` (`formal/bpx.sby`), not an argument:
 
 A control-port command that executes in the very clock a request is first seen (clear predictors, a raw table
 write) can delay that request by a clock. That path is exercised by the formal proofs, which leave the control port
-free (`bmc`, `prove`), not by the random runs, where control-port accesses and requests alternate.
+free (`bmc`, `prove`), and by the concurrent runs (`CONC=1 bash cosim/random.sh`, docs/verification.md 2a), which do
+not collect these bins.
 
 ## 2. Other bins
 
@@ -38,18 +39,21 @@ free (`bmc`, `prove`), not by the random runs, where control-port accesses and r
 | Host timing | gap before a request 0, 1–2, 3 or more clocks; `ID`/`OP` placed 0, 1, 2 clocks before `REQ` toggles |
 | Driving predictor × prediction | 5 drivers × taken / not-taken (static not-taken cannot predict taken: 9 bins) |
 | Prediction × confidence | 4 |
-| Provider of the default prediction | none (base), tagged table 0, 1, 2; alternate used or not |
+| Driving predictor × confidence | 4 predictors × confident or not (`CONF` is the driving predictor's) |
+| Features of the default predictor | each of the 16 settings of CTRL[15:12], at a predict and at a training |
+| Margin of the default predictor at a predict | \|sum\| at most the threshold, or above |
 | Errors | resolve with nothing in flight; predict with the queue full |
 | Combined request with the queue full | resolve first, mispredicted or not |
 | Flush | at depth 0 to 4 |
 | Repair | a mispredicted resolve discarding 0, 1, 2, 3 younger predictions |
 | Resolve × frozen × mispredicted | 4; resolve under each of the 5 drivers |
-| Training | provider none / table 0 / 1 / 2; provider weak or not; alternate present or not; allocation in table 0 / 1 / 2 or none; useful bits decayed or not |
+| Training | confident hit (weights unchanged), low-margin hit, miss, miss at low margin; a table counting negated or none; a weight already at its maximum, or at its minimum; the threshold moving up, down, or not |
 | Operation sequences | every ordered pair of the 5 operations (25) |
 
 Also checked in every run, as comparisons rather than bins: the statistics after snapshot and after
 snapshot-and-clear (including saturated counters and the overflow flag in the long stretch without clears), the
-complete predictor state through the raw-access port with and without branches in flight, clear predictors, clear
+complete predictor state through the raw-access port with and without branches in flight, the four prediction pins
+at every accepted predict, clear predictors, clear
 statistics and soft reset in the middle of the stream.
 
 ## 3. Not covered by the random runs
@@ -58,5 +62,5 @@ statistics and soft reset in the middle of the stream.
 | --- | --- |
 | Sub-clock host timing (edges anywhere inside a clock period) | `test/test.py` (cocotb, RTL and gate level): request edges at random picosecond offsets |
 | A request withdrawn before its acknowledge (counted as misuse) | formal: the inputs are free, so `REQ` may toggle at any time |
-| A control-port command in the same clock as a request | formal, as above |
-| Raw-access writes to the tables | `test/test.py`, directed test `raw_access_write` (RTL and gate level) |
+| A control-port command in the same clock as a request | formal, as above, and the concurrent random runs (verification.md 2a) |
+| Raw-access writes to the tables | `test/test.py`, directed test `raw_access_write` (RTL and gate level); the threshold register is also written in the random runs, the bimodal table in the concurrent runs |

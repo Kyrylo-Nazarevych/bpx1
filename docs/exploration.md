@@ -1,5 +1,9 @@
 # BPX-1 design-space exploration (DR-02)
 
+> **Status (26 Nov 2026):** this is the first exploration round, which chose the tagged-table design (tag
+> `g3-tage`, the fallback). On the owners' requirement the default predictor is now a perceptron: docs/perceptron.md
+> has that round. The benchmark set, the split and the method below are unchanged; identifiers are now 8 bits.
+
 What was explored, on what, how the design was chosen, and the evidence. Full generated tables:
 `docs/exploration_tables.md`. Every number here is **(VERIFIED)**: produced by `explore/bpsim.cc` on traces of the
 programs named, in this project, unless marked otherwise. The engine is cross-checked against the golden model

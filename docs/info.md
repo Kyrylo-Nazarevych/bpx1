@@ -10,11 +10,13 @@ You can also include images in this folder and reference them in the markdown. E
 ## How it works
 
 BPX-1 is a conditional-branch direction predictor for an external host: a pipelined RISC-V CPU on an FPGA, a
-microcontroller, or the Tiny Tapeout demo board. The host sends a 10-bit branch identifier and gets back a
+microcontroller, or the Tiny Tapeout demo board. The host sends an 8-bit branch identifier and gets back a
 taken / not-taken prediction; later it reports the real outcome and the chip learns from it.
 
-Four predictors see every branch: the default predictor (three tagged tables indexed with history lengths 4, 9 and
-20, falling back to the tournament) and three classic references (bimodal, gshare, and a tournament of the two). One of them, chosen at
+Four predictors see every branch: the default predictor, a hashed perceptron (four tables of signed weights indexed
+with 0, 8, 9 and 20 bits of branch history and 16 bits of path history, summed with the reference predictors'
+counters; a history bit negates a weight by reading it complemented), and three classic references (bimodal, gshare,
+and a tournament of the two). Each predictor's last prediction is on a pin. One of them, chosen at
 runtime, drives the prediction returned to the host. The chip counts the resolved branches and the mispredictions
 of each predictor, so algorithms can be compared on the same branch stream, on silicon.
 
@@ -28,8 +30,10 @@ two-phase handshake that works at any clock ratio; a separate SPI port reads sta
 predictions run. The full specification is `docs/SPEC.md`.
 
 Measured in simulation of the RTL inside a five-stage RV32IM CPU model, over 69 benchmark programs: the default
-predictor is right on 91.2 % of branches (tournament 88.9 %, gshare 87.4 %, bimodal 86.5 %) and makes the CPU
-1.13 times faster than static not-taken (`docs/cosim.md`).
+predictor is right on 91.4 % of branches (tournament 88.9 %, gshare 87.3 %, bimodal 86.5 %) and makes the CPU
+1.13 times faster than static not-taken (`docs/cosim.md`). Parts of the perceptron can be switched off at
+runtime, down to a plain hashed perceptron (90.0 %), and one experiment switched on: binarised inference, where
+only the signs of the weights vote (`docs/perceptron.md`).
 
 ## How to test
 
@@ -39,7 +43,8 @@ branch `ID` and trains on its outcome, which replays a recorded trace one record
 
 Control port: SPI mode 0 on `CSn` / `SCK` / `MOSI` / `MISO`, `SCK` at most one eighth of the chip clock.
 
-The clock can be anything up to 40 MHz, including single steps. The bring-up procedure is `docs/bringup.md`.
+The clock can be anything up to 33 MHz, including single steps. `uio[0]` and `uio[1]` are outputs of the chip
+(the bimodal and gshare predictions): do not drive them. The bring-up procedure is `docs/bringup.md`.
 
 ## External hardware
 

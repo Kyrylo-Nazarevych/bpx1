@@ -91,7 +91,7 @@ static const double A_BIT = 20.5, A_ENT = 6.5, A_ENT2 = 6.5, A_TAB = 550, A_FF =
 static double table_area(double entries, double ebits, bool two_fields = false) { return entries * ebits * A_BIT + entries * (two_fields ? A_ENT2 : A_ENT) + A_TAB; }
 struct Cost { double bits = 0, sbits = 0, area = 0, sarea = 0; };  // s* = part shared with the reference predictors
 
-struct Ctx { u32 id; bool bias; u64 gh; int same; };
+struct Ctx { u32 id; bool bias; u64 gh; int same; u64 ph = 0; };   // ph: path history, one identifier bit per branch
 
 struct Pred {
     virtual ~Pred() {}
@@ -342,6 +342,83 @@ struct OgehlP : Pred {
     }
 };
 
+// Hashed perceptron (GEHL) beside the chip's reference predictors (owner requirement, 26 Nov 2026).  The prediction
+// is the sign of a sum of signed weights (2w+1, never zero) read from nt tables, table i indexed by a hash of the id
+// and of the hl[i] most recent outcomes.  Options:
+//   ub, ug   the bimodal and the gshare counter enter the sum as (2c-3) times ub, ug;  ut: the tournament prediction as +-ut
+//   sx       the outcome just before a table's history segment negates its weight (one stored weight serves two patterns)
+//   sk       table-specific id hash (two branches that collide in one table do not collide in the others)
+//   dyn      adaptive threshold (O-GEHL): a counter of mispredictions against low-margin correct predictions moves theta
+//   cb=1     binarised weights: every table votes +-1 and the prediction is the majority (XNOR and popcount with sx)
+//   pr       probabilistic update: a weight in the outer half of its range moves further out only on a pseudo-random bit
+//            (a narrow weight then behaves like a wider one)
+//   pp       path history: one identifier bit of each of the last branches is hashed into the index as well
+//   bin      binarised inference: the prediction is the majority of the weights' signs; training is unchanged
+//   un       area only: weights stored in unary (thermometer) code, summed by a population count
+// The weights train on a misprediction or when |sum| <= theta; the references train by their own rules.
+struct GehlRP : Pred {
+    Tourn base; int nt, ent[8], lg[8], hl[8], cb, cmax, W, ub, ug, ut, theta, dyn, tc = 0, tcm, sx, sk, thmin, thmax, ini, pr, pp, un, bin; u32 lfsr = 0xACE1u;
+    vector<int8_t> T[8];
+    GehlRP(const Params& p) {
+        base.init(p.geti("bn", 64), p.geti("gn", 128), p.geti("gh", 4), p.geti("cn", 64), 0, -1, 0);
+        vector<int> te = p.getl("te"), th = p.getl("th");
+        nt = (int)th.size();
+        cb = p.geti("cb", 4); cmax = (1 << (cb - 1)) - 1; W = p.geti("W", 10);
+        ub = p.geti("ub", 0); ug = p.geti("ug", 0); ut = p.geti("ut", 0);
+        theta = p.geti("theta", 2 * nt); dyn = p.geti("dyn", 0); tcm = (1 << (p.geti("tcb", 4) - 1)) - 1;
+        thmin = p.geti("thmin", 1); thmax = p.geti("thmax", 63); sx = p.geti("sx", 0); sk = p.geti("sk", 0); ini = p.geti("ini", 1); pr = p.geti("pr", 0); pp = p.geti("pp", 0); un = p.geti("un", 0); bin = p.geti("bin", 0);
+        for (int i = 0; i < nt; i++) {
+            ent[i] = te[i < (int)te.size() ? i : te.size() - 1]; lg[i] = ilog2(ent[i]); hl[i] = th[i];
+            T[i].assign(ent[i], (int8_t)((ini && (i & 1) == (nt & 1)) ? 0 : (ini ? -1 : 0)));   // alternate +1 / -1: the sum starts near zero, leaning not-taken
+        }
+    }
+    inline int idx(int i, const Ctx& c) const {
+        int l = lg[i]; u32 ih;
+        if (sk) { u32 lo = c.id & mask32(l), hi = fold(c.id >> l, 32, l); int r = (i * sk) % l; ih = lo ^ (((hi << r) | (hi >> (l - r))) & mask32(l)); }
+        else ih = fold(c.id, 32, l);
+        u32 hh = hl[i] == 0 ? 0 : hl[i] <= l ? (u32)(c.gh & mask64(hl[i])) << (l - hl[i]) : fold(c.gh, hl[i], l) ^ (fold(c.gh, hl[i], l - 1) << 1);
+        if (pp && hl[i] > 0) { u32 x = fold(c.ph & mask64(min(hl[i], pp)), min(hl[i], pp), l); hh ^= ((x << 2) | (x >> (l - 2))) & mask32(l); }
+        return (ih ^ hh) & (ent[i] - 1);
+    }
+    inline bool neg(int i, const Ctx& c) const { return sx && hl[i] > 0 && ((c.gh >> hl[i]) & 1); }
+    // b: binarised inference (bin): only the signs of the weights vote; the weights still train in full
+    inline int sum(const Ctx& c, bool b = false) const {
+        int s = 0;
+        for (int i = 0; i < nt; i++) { int w = T[i][idx(i, c)]; if (b) w = w < 0 ? -1 : 0; int v = 2 * w + 1; s += neg(i, c) ? -v : v; }
+        if (ub) s += ub * (2 * (int)base.b.t[base.b.idx(c)] - 3);
+        if (ug) s += ug * (2 * (int)base.g.t[base.g.idx(c)] - 3);
+        if (ut) s += base.pred(c) ? ut : -ut;
+        return s;
+    }
+    bool predict(const Ctx& c) override { return sum(c, bin) >= 0; }
+    void train(const Ctx& c, bool tk) override {
+        int s = sum(c); bool pr = (bin ? sum(c, true) : s) >= 0, low = abs(s) <= theta;
+        if (pr != tk || low)
+        {
+            if (this->pr) lfsr = (lfsr >> 1) ^ ((lfsr & 1) ? 0xB400u : 0);
+            int half = (cmax + 1) / 2;
+            for (int i = 0; i < nt; i++) {
+                int8_t& v = T[i][idx(i, c)]; bool up = tk != neg(i, c);
+                if (this->pr && ((up && v >= half) || (!up && v < -half)) && !((lfsr >> i) & 1)) continue;
+                if (up) { if (v < cmax) v++; } else { if (v > -cmax - 1) v--; }
+            }
+        }
+        if (dyn) {
+            if (pr != tk) { if (++tc > tcm) { tc = 0; if (theta < thmax) theta++; } }
+            else if (low) { if (--tc < -tcm - 1) { tc = 0; if (theta > thmin) theta--; } }
+        }
+        base.upd(c, tk);
+    }
+    Cost cost() override {
+        Cost k; int hm = 0;
+        for (int i = 0; i < nt; i++) { int sb = un ? (1 << cb) - 1 : cb; k.bits += (double)ent[i] * sb; k.area += table_area(ent[i], sb) + A_XOR * hl[i] + (cb + 3) * A_FA + cb * A_FA; hm = max(hm, hl[i] + sx); }
+        k.area += 2 * A_FF * max(0, hm - base.g.h) + (dyn ? 12 * A_FF : 0) + (pp ? 2 * A_FF * pp : 0) + (pr ? 16 * A_FF : 0);
+        k.sbits = base.bits(); k.sarea = base.area() + 2 * A_FF * base.g.h;
+        k.bits += k.sbits; k.area += k.sarea;
+        return k;
+    }
+};
+
 // ---------------------------------------------------------------------------------------------- TAGE family
 // Tagged geometric-history tables over a base predictor (Seznec, Michaud 2006), reduced to what a tiny budget
 // affords.  The base is a bimodal table, or a bimodal + gshare + chooser tournament.  With basemode=1 the base
@@ -498,6 +575,7 @@ static Pred* make(const string& kind, const Params& p) {
     else if (kind == "perceptron") m = new PerceptronP(p);
     else if (kind == "ogehl") m = new OgehlP(p);
     else if (kind == "tage") m = new TageP(p);
+    else if (kind == "gehlr") m = new GehlRP(p);
     else { fprintf(stderr, "unknown kind %s\n", kind.c_str()); exit(2); }
     if (p.geti("ln", 0) > 0) m = new LoopWrap(m, p);
     return m;
@@ -530,7 +608,7 @@ static Res run_trace(const Trace& tr, const string& kind, const Params& p, const
         btb[i] = a;                      // written when the instruction is decoded
         return h;
     };
-    u64 gh = 0, cyc = 1, snt = 1, last_id_req = ~0ull;
+    u64 gh = 0, ph = 0, cyc = 1, snt = 1, last_id_req = ~0ull;
     const int pm = cc.R + 1;
     for (const Rec& r : tr.r) {
         u32 kindr = r.info & 3, nb = r.info >> 8;
@@ -540,7 +618,7 @@ static Res run_trace(const Trace& tr, const string& kind, const Params& p, const
         res.ins++;
         if (kindr == 0) {
             bool taken = (r.info >> 2) & 1;
-            Ctx c; c.id = fold_id(r.pc, cc.W); c.bias = cc.hint ? (r.target < r.pc) : false; c.gh = gh; c.same = 0;
+            Ctx c; c.id = fold_id(r.pc, cc.W); c.bias = cc.hint ? (r.target < r.pc) : false; c.gh = gh; c.same = 0; c.ph = ph;
             if (cc.seq) {                // strictly sequential reference: one branch in flight
                 if (ps->predict(c) != taken) res.mis_seq++;
                 ps->train(c, taken);
@@ -560,6 +638,7 @@ static Res run_trace(const Trace& tr, const string& kind, const Params& p, const
             else cyc += 1 + ((taken && !hit) ? 1 : 0);
             snt += 1 + (taken ? pm : 0);
             gh = (gh << 1) | (taken ? 1 : 0);
+            ph = (ph << 1) | ((c.id ^ (c.id >> 3)) & 1);
             res.br++;
         } else if (kindr == 1) { int b = btb_hit(r.pc) ? 0 : 1; cyc += 1 + b; snt += 1 + b; }
         else { cyc += 1 + pm; snt += 1 + pm; }

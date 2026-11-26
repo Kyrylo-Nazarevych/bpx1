@@ -18,16 +18,23 @@
 `default_nettype none
 
 module bpx_core #(
-    parameter W   = 10,
+    parameter W   = 8,
     parameter LGB = 6,
     parameter LGG = 7,
     parameter HG  = 4,
-    parameter NT  = 3,
-    parameter LGT = 4,
-    parameter TB  = 7,
-    parameter [NT*6-1:0] LV = {6'd20, 6'd9, 6'd4},
-    parameter HL  = 20,
-    parameter ALLOC_LFSR = 1,
+    parameter NT  = 4,
+    parameter LGT = 5,
+    parameter CB  = 5,
+    parameter [NT*6-1:0] LV = {6'd20, 6'd9, 6'd8, 6'd0},
+    parameter HL  = 21,
+    parameter PL  = 16,
+    parameter UBW = 2,
+    parameter UGW = 4,
+    parameter UTW = 4,
+    parameter SK  = 0,
+    parameter THETA = 12,
+    parameter SB  = 9,
+    parameter FEAT = 4'b0111,      // features of the default predictor enabled after reset (CTRL[15:12])
     parameter STATW = 16           // statistics counter width (16..32)
 ) (
     input  wire         clk,
@@ -42,6 +49,7 @@ module bpx_core #(
     output reg          full,
     output reg          ready,
     output reg  [1:0]   dbg,
+    output wire [3:0]   lastp,     // predictions of the last predict: {tournament, gshare, bimodal, default}
     // control-port registers (bpx_spi)
     input  wire [5:0]   reg_addr,
     input  wire         reg_we,
@@ -49,7 +57,7 @@ module bpx_core #(
     input  wire [15:0]  reg_wdata,
     output reg  [15:0]  reg_rdata
 );
-  localparam SW = 6 * NT + 6;       // staging register width
+  localparam SW = CB * NT + 6;      // staging register width
   localparam QW = W + 5;            // queue entry: {pdrv, trn, gsh, bim, def, id}
   localparam [STATW-1:0] SMAX = {STATW{1'b1}};
 
@@ -57,6 +65,7 @@ module bpx_core #(
   reg  [2:0] drive;                 // 0 default, 1 bimodal, 2 gshare, 3 tournament, 4..7 static not-taken
   reg        freeze;
   reg  [3:0] dsel0, dsel1;
+  reg  [3:0] feat;                  // default predictor: {binarised inference, adaptive threshold, negation by history, reference inputs}
   reg        srst;                  // soft reset, one cycle
   wire       irst = rst | srst;
   reg        init_pend, clrp_pend, snap_pend, snap_q, sclr_pend, sclr_q;
@@ -66,16 +75,19 @@ module bpx_core #(
   reg  [1:0]    qhead;
   reg  [2:0]    qcnt;
   reg  [HL-1:0] ch, sh;             // committed and speculative history, bit 0 = most recent
+  reg  [PL-1:0] pch, psh;           // committed and speculative path history: one identifier bit per branch
+  wire          pb_p = id_d[0] ^ id_d[3];
   reg  [SW-1:0] stg;
   reg           stg_v;
   reg           rpend, rtk, rf_done, seen;
   reg  [3:0]    lp;                 // predictions of the last predict (debug)
+  assign lastp = lp;
   reg  [STATW-1:0] n_res, mis0, mis1, mis2, mis3;
   reg  [7:0]    err_cnt;
   reg  [3:0]    eflags;             // sticky: {statistics overflow, withdrawn, predict on full, resolve on empty}
   // raw access from the control port
   reg  [6:0]    da;
-  reg  [2:0]    dspace;             // 0 BC, 1 G, 2.. tagged tables, 7 small registers
+  reg  [3:0]    dspace;             // 0 BC, 1 G, 7 small registers, 8.. weight tables
   reg  [1:0]    dwm;                // field write enables {field 1, field 0}
   reg           dinc;               // address + 1 after each data read
   reg  [11:0]   dq, dwd;
@@ -85,6 +97,7 @@ module bpx_core #(
   wire          q_full  = qcnt == 3'd4;
   wire [QW-1:0] head    = qmem[qhead];
   wire [W-1:0]  h_id    = head[W-1:0];
+  wire          pb_c    = h_id[0] ^ h_id[3];
   wire [3:0]    h_preds = head[W+3:W];
   wire          h_pdrv  = head[W+4];
 
@@ -93,21 +106,22 @@ module bpx_core #(
   bpx_wseq u_wseq (.clk(clk), .rst(rst), .req(wreq), .wcap(wcap), .wact(wact), .wpulse(wpulse), .busy(wbusy));
 
   wire [1:0]    rsel;
-  wire          p_def, p_bim, p_gsh, p_trn, p_conf;
+  wire          p_def, p_bim, p_gsh, p_trn;
+  wire [3:0]    p_conf;             // per predictor, as preds
   wire [SW-1:0] look;
   wire [11:0]   t_rdata;
-  wire [3:0]    ua_q;
-  wire [7:0]    lfsr_q;
+  wire [3:0]    tc_q;
+  wire [7:0]    theta_q;
   wire          train, tk, clr_exec, dwr_tab, misc_we;
 
-  bpx_pred #(.W(W), .LGB(LGB), .LGG(LGG), .HG(HG), .NT(NT), .LGT(LGT), .TB(TB), .LV(LV), .HL(HL), .ALLOC_LFSR(ALLOC_LFSR)) u_pred (
-      .clk(clk), .rst(irst), .wcap(wcap), .wact(wact), .wpulse(wpulse),
-      .rsel(rsel), .id_p(id_d), .hist_p(sh), .id_c(h_id), .hist_c(ch),
+  bpx_pred #(.W(W), .LGB(LGB), .LGG(LGG), .HG(HG), .NT(NT), .LGT(LGT), .CB(CB), .LV(LV), .HL(HL), .PL(PL), .UBW(UBW), .UGW(UGW), .UTW(UTW), .SK(SK), .THETA(THETA), .SB(SB)) u_pred (
+      .clk(clk), .rst(irst), .feat(feat), .wcap(wcap), .wact(wact), .wpulse(wpulse),
+      .rsel(rsel), .id_p(id_d), .hist_p(sh), .path_p(psh), .id_c(h_id), .hist_c(ch), .path_c(pch),
       .dbg_tab(dspace), .dbg_addr(da), .dbg_rdata(t_rdata),
       .p_def(p_def), .p_bim(p_bim), .p_gsh(p_gsh), .p_trn(p_trn), .conf(p_conf), .look(look),
       .train(train), .taken(tk), .stg(stg),
       .clr(clr_exec), .dbg_we0(dwr_tab & dwm[0]), .dbg_we1(dwr_tab & dwm[1]), .dbg_wdata(dwd),
-      .ua_q(ua_q), .lfsr_q(lfsr_q), .misc_we(misc_we), .misc_wdata(dwd));
+      .tc_q(tc_q), .theta_q(theta_q), .misc_we(misc_we), .misc_wdata(dwd));
 
   // ---------------------------------------------------------------- request decode
   wire pending = ready & (req_s != ack);
@@ -146,14 +160,14 @@ module bpx_core #(
   // resolve-first of its own, needs the staging lookup to happen first.  Found by the formal liveness proof.)
   wire hold_p   = p_exec;
   wire do_stage = ready & ~q_empty & ~stg_v & ~wbusy & ~hold_p & ~clr_exec;
-  wire d_tab    = dspace != 3'd7;
+  wire d_tab    = dspace != 4'd7;
   wire drd_exec = drd_pend & (~d_tab | (~wbusy & ~hold_p & ~do_stage & ~clr_exec));
   assign rsel   = do_stage ? 2'd1 : (drd_exec & d_tab) ? 2'd2 : 2'd0;
 
   // write port
   wire dwr_exec = dwr_pend & ~wbusy & ~r_exec & ~clr_exec;
   assign dwr_tab = dwr_exec & d_tab;
-  assign misc_we = dwr_exec & ~d_tab & (da[2:0] == 3'd4);
+  assign misc_we = dwr_exec & ~d_tab & (da[3:0] == 4'd4);
   wire snap_exec = snap_pend & ~wbusy & ~r_exec & ~clr_exec & ~dwr_exec;
   assign wreq    = clr_exec | train | dwr_tab | snap_exec;
 
@@ -161,17 +175,23 @@ module bpx_core #(
   wire [3:0] preds = {p_trn, p_gsh, p_bim, p_def};
   wire       pdrv  = drive[2] ? 1'b0 : preds[drive[1:0]];
 
-  // small registers visible through the raw access port (space 7): histories, use-alternate counter and LFSR
+  // small registers visible through the raw access port (space 7): histories, threshold and its adaptation counter
   reg [11:0] misc;
   wire [23:0] ch24 = ch;            // zero-extended
   wire [23:0] sh24 = sh;
+  wire [23:0] pch24 = pch;
+  wire [23:0] psh24 = psh;
   always @* begin
-    case (da[2:0])
-      3'd0:    misc = ch24[11:0];
-      3'd1:    misc = ch24[23:12];
-      3'd2:    misc = sh24[11:0];
-      3'd3:    misc = sh24[23:12];
-      3'd4:    misc = {lfsr_q, ua_q};
+    case (da[3:0])
+      4'd0:    misc = ch24[11:0];
+      4'd1:    misc = ch24[23:12];
+      4'd2:    misc = sh24[11:0];
+      4'd3:    misc = sh24[23:12];
+      4'd4:    misc = {theta_q, tc_q};
+      4'd5:    misc = pch24[11:0];
+      4'd6:    misc = pch24[23:12];
+      4'd7:    misc = psh24[11:0];
+      4'd8:    misc = psh24[23:12];
       default: misc = {5'd0, rpend, stg_v, qhead, qcnt};
     endcase
   end
@@ -190,7 +210,7 @@ module bpx_core #(
   always @* begin
     case (reg_addr[4:0])
       5'h00:   reg_rdata = 16'hB101;
-      5'h01:   reg_rdata = {4'd0, dsel1, dsel0, freeze, drive};
+      5'h01:   reg_rdata = {feat, dsel1, dsel0, freeze, drive};
       5'h03:   reg_rdata = {4'd0, eflags, drd_pend | dwr_pend, wbusy, pending, stg_v, ready, qcnt};
       5'h04:   reg_rdata = {8'd0, err_cnt};
       5'h05:   reg_rdata = sn0[15:0];
@@ -203,7 +223,7 @@ module bpx_core #(
       5'h0c:   reg_rdata = sn3[31:16];
       5'h0d:   reg_rdata = sn4[15:0];
       5'h0e:   reg_rdata = sn4[31:16];
-      5'h0f:   reg_rdata = {dinc, 1'b0, dwm, 1'b0, dspace, 1'b0, da};
+      5'h0f:   reg_rdata = {dinc, 1'b0, dwm, dspace, 1'b0, da};
       5'h10:   reg_rdata = {4'd0, dq};
       default: reg_rdata = 16'd0;
     endcase
@@ -216,7 +236,8 @@ module bpx_core #(
   wire r_dd   = reg_re & (reg_addr == 6'h10);
 
   // debug events
-  wire [15:0] evt = {do_stage, reg_we | reg_re, lp[3], lp[2], lp[1], lp[0], q_empty, stg_v, wact,
+  wire [3:0]  lp_n = p_exec ? preds : lp;        // so that the DBG pins change together with ACK, like PRED
+  wire [15:0] evt = {do_stage, reg_we | reg_re, lp_n[3], lp_n[2], lp_n[1], lp_n[0], q_empty, stg_v, wact,
                      p_refuse | r_empty | (seen & ~pending & ready), fl_exec, r_misp, r_exec, p_exec, pending & ~seen, 1'b0};
 
   wire [2:0] qcnt_n = (fl_exec | r_misp) ? 3'd0 : qcnt + {2'b00, p_exec} - {2'b00, r_exec};
@@ -227,8 +248,9 @@ module bpx_core #(
     if (irst) begin
       drive     <= 3'd0;
       freeze    <= 1'b0;
-      dsel0     <= 4'd0;
-      dsel1     <= 4'd0;
+      dsel0     <= 4'd10;                           // DBG0: last prediction of the default predictor
+      dsel1     <= 4'd13;                           // DBG1: last prediction of the tournament
+      feat      <= FEAT;
       init_pend <= 1'b1;
       clrp_pend <= 1'b0;
       snap_pend <= 1'b0;
@@ -239,6 +261,8 @@ module bpx_core #(
       qcnt      <= 3'd0;
       ch        <= {HL{1'b0}};
       sh        <= {HL{1'b0}};
+      pch       <= {PL{1'b0}};
+      psh       <= {PL{1'b0}};
       stg       <= {SW{1'b0}};
       stg_v     <= 1'b0;
       rpend     <= 1'b0;
@@ -254,7 +278,7 @@ module bpx_core #(
       err_cnt   <= 8'd0;
       eflags    <= 4'd0;
       da        <= 7'd0;
-      dspace    <= 3'd0;
+      dspace    <= 4'd0;
       dwm       <= 2'd0;
       dinc      <= 1'b0;
       dq        <= 12'd0;
@@ -286,8 +310,9 @@ module bpx_core #(
       if (p_exec) begin
         qmem[qhead+qcnt[1:0]] <= {pdrv, preds, id_d};
         sh   <= {sh[HL-2:0], pdrv};
+        psh  <= {psh[PL-2:0], pb_p};
         pred <= pdrv;
-        conf <= p_conf;
+        conf <= ~drive[2] & p_conf[drive[1:0]];     // CONF qualifies PRED: the confidence of the driving predictor
         lp   <= preds;
         if (q_empty) begin                          // the predict lookup is the commit lookup
           stg   <= look;
@@ -312,6 +337,7 @@ module bpx_core #(
       // -------- resolve
       if (r_exec) begin
         ch    <= {ch[HL-2:0], tk};
+        pch   <= {pch[PL-2:0], pb_c};
         qhead <= qhead + 2'd1;
         stg_v <= 1'b0;
         rpend <= 1'b0;
@@ -321,10 +347,14 @@ module bpx_core #(
         if ((h_preds[1] != tk) && (mis1 != SMAX)) mis1 <= mis1 + 1'b1;
         if ((h_preds[2] != tk) && (mis2 != SMAX)) mis2 <= mis2 + 1'b1;
         if ((h_preds[3] != tk) && (mis3 != SMAX)) mis3 <= mis3 + 1'b1;
-        if (r_misp) sh <= {ch[HL-2:0], tk};         // repair: discard everything younger
+        if (r_misp) begin                           // repair: discard everything younger
+          sh  <= {ch[HL-2:0], tk};
+          psh <= {pch[PL-2:0], pb_c};
+        end
       end
       if (fl_exec) begin
         sh    <= ch;
+        psh   <= pch;
         stg_v <= 1'b0;
       end
       qcnt <= qcnt_n;
@@ -374,6 +404,8 @@ module bpx_core #(
         full    <= 1'b0;
         ch      <= {HL{1'b0}};
         sh      <= {HL{1'b0}};
+        pch     <= {PL{1'b0}};
+        psh     <= {PL{1'b0}};
         stg_v   <= 1'b0;
         rpend   <= 1'b0;
         rf_done <= 1'b0;
@@ -385,6 +417,7 @@ module bpx_core #(
         freeze <= reg_wdata[3];
         dsel0  <= reg_wdata[7:4];
         dsel1  <= reg_wdata[11:8];
+        feat   <= reg_wdata[15:12];
       end
       if (w_cmd) begin
         if (reg_wdata[0]) srst <= 1'b1;
@@ -403,7 +436,7 @@ module bpx_core #(
       end
       if (w_da) begin
         da       <= reg_wdata[6:0];
-        dspace   <= reg_wdata[10:8];
+        dspace   <= reg_wdata[11:8];
         dwm      <= reg_wdata[13:12];
         dinc     <= reg_wdata[15];
         drd_pend <= 1'b1;
@@ -500,16 +533,16 @@ module bpx_core #(
         assert (!stg_v);
         assert (!$past(train));
       end
-      if ($past(fl_exec && !misc_we)) assert (ua_q == $past(ua_q) && lfsr_q == $past(lfsr_q));
+      if ($past(fl_exec && !misc_we)) assert (tc_q == $past(tc_q) && theta_q == $past(theta_q));
       // ---- FR-01: a predict changes no trained state and starts no table write
       if ($past(p_exec && !r_exec)) assert (ch == $past(ch) && !$past(train));
       if ($past(p_exec && !r_exec && !dwr_exec && !snap_exec)) assert (!$past(wcap));
-      if ($past(p_exec && !r_exec && !misc_we)) assert (ua_q == $past(ua_q) && lfsr_q == $past(lfsr_q));
+      if ($past(p_exec && !r_exec && !misc_we)) assert (tc_q == $past(tc_q) && theta_q == $past(theta_q));
       if ($past(p_exec && !r_exec && !w_cmd && !(wact && snap_q && sclr_q)))
         assert (n_res == $past(n_res) && mis0 == $past(mis0) && mis1 == $past(mis1) && mis2 == $past(mis2) && mis3 == $past(mis3));
       //      trained registers change only by a resolve, a clear or a raw write
       if (ch != $past(ch)) assert ($past(r_exec) || $past(clr_exec));
-      if (ua_q != $past(ua_q) || lfsr_q != $past(lfsr_q)) assert ($past(train) || $past(misc_we) || $past(clr_exec));
+      if (tc_q != $past(tc_q) || theta_q != $past(theta_q)) assert ($past(train) || $past(misc_we) || $past(clr_exec));
       if ($past(wcap)) assert ($past(train) || $past(clr_exec) || $past(dwr_tab) || $past(snap_exec));
       if ($past(train)) assert ($past(r_exec) && !$past(freeze));
       // ---- IR-09: a resolve with nothing in flight is refused, counted, acknowledged, and changes nothing else

@@ -9,7 +9,8 @@
 # been run on hardware yet (docs/bringup.md).
 #
 # Pins (docs/SPEC.md section 2):
-#   ui_in[7:0] ID[7:0]   uio[1:0] ID[9:8]   uio[3:2] OP   uio[4] CSn   uio[5] SCK   uio[6] MOSI   uio[7] REQ
+#   ui_in[7:0] ID[7:0]   uio[3:2] OP   uio[4] CSn   uio[5] SCK   uio[6] MOSI   uio[7] REQ
+#   uio[0] PBIM, uio[1] PGSH: outputs of the chip (never drive them)
 #   uo_out[0] ACK  [1] PRED  [2] CONF  [3] FULL  [4] READY  [5] DBG0  [6] DBG1  [7] MISO
 
 OP_SPECIAL, OP_PREDICT, OP_PR_NT, OP_PR_T = 0, 1, 2, 3
@@ -20,11 +21,11 @@ DRIVE = ("default", "bimodal", "gshare", "tournament", "static not-taken")
 
 
 def fold_id(pc):
-    """Branch address -> 10-bit identifier (IR-05): XOR of the 10-bit slices of pc[31:2]."""
+    """Branch address -> 8-bit identifier (IR-05): XOR of the 8-bit slices of pc[31:2]."""
     v, r = (pc >> 2) & 0x3FFFFFFF, 0
     while v:
-        r ^= v & 0x3FF
-        v >>= 10
+        r ^= v & 0xFF
+        v >>= 8
     return r
 
 
@@ -54,7 +55,7 @@ class Bpx1Host:
         """One request; returns (pred, conf)."""
         ack = self.get_uo() & 1
         self.set_ui(ident & 0xFF)
-        self.uio = (self.uio & 0xF0) | ((ident >> 8) & 3) | ((op & 3) << 2)
+        self.uio = (self.uio & 0xF0) | ((op & 3) << 2)
         self.set_uio(self.uio)               # ID and OP first
         self.uio ^= 0x80
         self.set_uio(self.uio)               # then toggle REQ
@@ -129,9 +130,13 @@ class Bpx1Host:
     def chip_id(self):
         return self.read(REG_ID)[0]          # 0xB101
 
-    def set_drive(self, drive=0, freeze=False):
-        """Which predictor answers the host: 0 default, 1 bimodal, 2 gshare, 3 tournament, 4 static not-taken."""
-        self.write(REG_CTRL, (drive & 7) | (8 if freeze else 0))
+    def set_drive(self, drive=0, freeze=False, features=7, dbg0=10, dbg1=13):
+        """Which predictor answers the host: 0 default, 1 bimodal, 2 gshare, 3 tournament, 4 static not-taken.
+        features (CTRL[15:12]) of the default predictor: 1 reference inputs, 2 negation in memory, 4 adaptive
+        threshold (7 = as after reset), 8 binarised inference (experiment); 0 = safe mode, the plain perceptron.
+        dbg0, dbg1: events on the DBG pins (10 and 13: the last predictions of the default predictor and the
+        tournament, as after reset)."""
+        self.write(REG_CTRL, (drive & 7) | (8 if freeze else 0) | ((dbg0 & 15) << 4) | ((dbg1 & 15) << 8) | ((features & 15) << 12))
 
     def command(self, bits):
         self.write(REG_CMD, bits)
@@ -147,7 +152,7 @@ class Bpx1Host:
                     errors=w[1] & 0xFF, err_flags=(w[0] >> 8) & 0xF, in_flight=w[0] & 7)
 
     def dump(self, space, count):
-        """Raw state (FR-10): space 0 bimodal+chooser, 1 gshare, 2..4 tagged tables, 7 small registers."""
+        """Raw state (FR-10): space 0 bimodal+chooser, 1 gshare, 7 small registers, 8.. weight tables."""
         self.write(REG_RAW_ADDR, 0x8000 | (space << 8))
         for _ in range(8):
             self.idle()
@@ -174,7 +179,7 @@ class TTPins:
         tt = DemoBoard.get()
         tt.mode = RPMode.ASIC_RP_CONTROL
         getattr(tt.shuttle, project).enable()
-        tt.uio_oe_pico.value = 0xFF
+        tt.uio_oe_pico.value = 0xFC          # uio[1:0] are outputs of the chip: the board must not drive them
         tt.ui_in.value = 0
         tt.uio_in.value = 0x10
         tt.clock_project_PWM(clock_hz)
@@ -208,8 +213,8 @@ def demo(clock_hz=1_000_000):
     for outer in range(200):
         for inner in range(5):
             trace.append((0x040, inner < 4))
-            trace.append((0x123, (outer + inner) & 1))
-        trace.append((0x3F1, outer % 9 != 0))
+            trace.append((0x023, (outer + inner) & 1))
+        trace.append((0x0F1, outer % 9 != 0))
     wrong = h.replay(trace)
     s = h.stats()
     print("branches:", len(trace), "mispredicted by the driving predictor:", wrong)

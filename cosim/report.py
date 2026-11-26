@@ -58,6 +58,10 @@ def main():
     w("`bpx_chip`, behavioural table model `BPX_BEHAV`) driven through its pins by the U1 CPU contract of")
     w("docs/SPEC.md section 9. Method and reading: docs/verification.md.\n")
     dual = R[progs[0]]["d"][0].get("dual", 0)
+    if os.path.basename(os.path.normpath(O)) == "cosim_safe":
+        w("**Safe mode of the default predictor: CTRL[15:12] = 0 (plain hashed perceptron: no reference inputs, no negation, "
+          "fixed threshold).** The cross-check of section 6 compares with the full default predictor and does not apply here.")
+    w("")
     w(f"**Adapter mode: {'two requests per CPU cycle where needed (SPEC 9, rule 7)' if dual else 'one request per CPU cycle'}**, "
       f"{R[progs[0]]['d'][0]['K']} chip clocks per CPU cycle.\n")
 
@@ -194,7 +198,8 @@ def main():
         w(f"| {p} | {d[0]['branches']:,} | {d[0]['snt_cycles']:,} | " + " | ".join(f"{d[i]['cycles']:,}" for i in range(4)) + " | " +
           " | ".join(f"{100 * (1 - d[0][k] / br):.2f}" for k in PK) + f" | {100 * (1 - R[p]['seq']['mis_def'] / max(R[p]['seq']['branches'], 1)):.2f} |")
     w("")
-    out = "docs/cosim_dual.md" if dual else "docs/cosim.md"
+    safe = os.path.basename(os.path.normpath(O)) == "cosim_safe"       # run with BPX_FEAT=0
+    out = "docs/cosim_safe.md" if safe else "docs/cosim_dual.md" if dual else "docs/cosim.md"
     open(out, "w", encoding="utf-8", newline="\n").write("\n".join(L))
     print("\n".join(L[:60]))
     print("wrote", out, len(progs), "programs")

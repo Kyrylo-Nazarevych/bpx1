@@ -3,9 +3,9 @@ project:
   title:        "BPX-1 branch prediction coprocessor"      # Project title
   author:       "Kyrylo Nazarevych, Märten Erik Loor, Ilma Kule, Vitalii Haponenko"      # Your name
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  "Stand-alone conditional-branch direction predictor: a tagged geometric-history predictor and three classic references, with an asynchronous host port and an SPI control port"      # One line description of what your project does
+  description:  "Stand-alone conditional-branch direction predictor: a hashed perceptron and three classic references, with an asynchronous host port and an SPI control port"      # One line description of what your project does
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
-  clock_hz:     40000000       # Clock frequency in Hz (or 0 if not applicable)
+  clock_hz:     33333333       # Clock frequency in Hz (or 0 if not applicable)
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
   tiles: "2x2"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
@@ -40,16 +40,16 @@ pinout:
   # Outputs
   uo[0]: "ACK (toggles once per request)"
   uo[1]: "PRED (prediction of the driving predictor)"
-  uo[2]: "CONF (confidence of the default predictor)"
+  uo[2]: "CONF (confidence of the driving predictor)"
   uo[3]: "FULL (in-flight queue full)"
   uo[4]: "READY"
-  uo[5]: "DBG0 (selectable internal event)"
-  uo[6]: "DBG1 (selectable internal event)"
+  uo[5]: "DBG0 (selectable event; after reset: last prediction of the default predictor)"
+  uo[6]: "DBG1 (selectable event; after reset: last prediction of the tournament)"
   uo[7]: "MISO (control port)"
 
   # Bidirectional pins
-  uio[0]: "ID[8] (input)"
-  uio[1]: "ID[9] (input)"
+  uio[0]: "PBIM (output: last prediction of the bimodal predictor)"
+  uio[1]: "PGSH (output: last prediction of the gshare predictor)"
   uio[2]: "OP[0] (input)"
   uio[3]: "OP[1] (input)"
   uio[4]: "CSn (control port, input)"
