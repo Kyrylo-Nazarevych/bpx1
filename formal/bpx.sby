@@ -1,0 +1,40 @@
+# BPX-1 formal proofs (spec VR-03).  Properties: the `ifdef FORMAL` block at the end of src/bpx_core.v.
+#   bash formal/run.sh [task]
+# bmc      bounded check from reset, every assertion, free inputs; tables of 8/16/8 entries
+# prove    k-induction: the same assertions from any state that satisfies them (unbounded); small tables
+# cover    a trace for each operation, a full queue, a misprediction with a full queue and its repair
+# nowait   legal host, silent control port: which requests can never be made to wait (docs/coverage.md)
+# bmcfull  as bmc with the chip's table sizes (64/128/16 entries), to a smaller depth
+[tasks]
+bmc small
+prove small
+cover small
+nowait
+bmcfull
+
+[options]
+bmc: mode bmc
+bmc: depth 60
+prove: mode prove
+prove: depth 24
+cover: mode cover
+cover: depth 40
+nowait: mode prove
+nowait: depth 24
+bmcfull: mode bmc
+bmcfull: depth 30
+
+[engines]
+smtbmc boolector
+
+[script]
+bmcfull: read -formal -D FORMAL -D BPX_BEHAV -D FV_QUIET=20 -D FV_LGB=6 -D FV_LGG=7 -D FV_LGT=4 bpx_ltab.v bpx_pred.v bpx_core.v bpx_fv_top.v
+nowait: read -formal -D FORMAL -D BPX_BEHAV -D FV_QUIET=20 -D FV_NOSPI -D FV_LGB=3 -D FV_LGG=4 -D FV_LGT=3 bpx_ltab.v bpx_pred.v bpx_core.v bpx_fv_top.v
+small: read -formal -D FORMAL -D BPX_BEHAV -D FV_QUIET=20 -D FV_LGB=3 -D FV_LGG=4 -D FV_LGT=3 bpx_ltab.v bpx_pred.v bpx_core.v bpx_fv_top.v
+prep -top bpx_fv_top
+
+[files]
+../src/bpx_ltab.v
+../src/bpx_pred.v
+../src/bpx_core.v
+bpx_fv_top.v

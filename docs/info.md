@@ -13,8 +13,8 @@ BPX-1 is a conditional-branch direction predictor for an external host: a pipeli
 microcontroller, or the Tiny Tapeout demo board. The host sends a 10-bit branch identifier and gets back a
 taken / not-taken prediction; later it reports the real outcome and the chip learns from it.
 
-Four predictors see every branch: the default predictor (tagged tables indexed with geometric history lengths over
-a bimodal base) and three classic references (bimodal, gshare, and a tournament of the two). One of them, chosen at
+Four predictors see every branch: the default predictor (three tagged tables indexed with history lengths 4, 9 and
+20, falling back to the tournament) and three classic references (bimodal, gshare, and a tournament of the two). One of them, chosen at
 runtime, drives the prediction returned to the host. The chip counts the resolved branches and the mispredictions
 of each predictor, so algorithms can be compared on the same branch stream, on silicon.
 
@@ -27,8 +27,9 @@ The predictor state lives in latch tables written by pulses built from flip-flop
 two-phase handshake that works at any clock ratio; a separate SPI port reads statistics and every state bit while
 predictions run. The full specification is `docs/SPEC.md`.
 
-**Note:** until gate G2 the repository holds the area probe of the storage tables (see the top-level source), not
-the predictor.
+Measured in simulation of the RTL inside a five-stage RV32IM CPU model, over 69 benchmark programs: the default
+predictor is right on 91.2 % of branches (tournament 88.9 %, gshare 87.4 %, bimodal 86.5 %) and makes the CPU
+1.13 times faster than static not-taken (`docs/cosim.md`).
 
 ## How to test
 
@@ -38,7 +39,7 @@ branch `ID` and trains on its outcome, which replays a recorded trace one record
 
 Control port: SPI mode 0 on `CSn` / `SCK` / `MOSI` / `MISO`, `SCK` at most one eighth of the chip clock.
 
-The MicroPython host for the demo board and the bring-up procedure are in `host/` and `docs/bringup.md`.
+The clock can be anything up to 40 MHz, including single steps. The bring-up procedure is `docs/bringup.md`.
 
 ## External hardware
 

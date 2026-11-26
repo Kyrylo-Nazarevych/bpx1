@@ -178,7 +178,9 @@ template requires nothing else).
 ### 6.1 One read port, staged training
 
 Each table has **one** read port and one write port. A cycle's read is used by, in priority order: a predict
-(speculative history); the **staging read** of the oldest in-flight branch (committed history), done as soon as that
+that executes in this cycle (speculative history; a predict that is still waiting, for a write to finish or for the
+resolve that must go before it, does not hold the port: holding it would deadlock, as the formal liveness proof
+showed, docs/verification.md 4); the **staging read** of the oldest in-flight branch (committed history), done as soon as that
 branch becomes the oldest and kept in a small register; a control-port read. A resolve then needs no read: it
 computes the new table values from the staging register and the outcome and hands them to the write sequencer. A
 predict that finds the queue empty is its own staging read (same index, same data). So a combined request costs one
@@ -331,13 +333,28 @@ Rules the CPU's adapter follows:
    squashed and never asks.
 3. A branch asks once, however long it is stalled; the adapter keeps `PRED` until the branch reaches EX.
 4. Outcomes are reported in program order, each in the cycle after its branch leaves EX. A misprediction needs no
-   extra request: the resolve that reports it makes the chip discard the wrong-path predictions.
+   extra request: the resolve that reports it makes the chip discard the wrong-path predictions. That resolve is
+   sent **alone** (`OP = 00`), never combined with a predict: the chip discards everything younger than the
+   mispredicted branch, and a predict combined with it (predict first, then resolve) would be discarded too. The
+   branch that is in IF in that cycle, the first one of the correct path, asks one cycle later (one bubble). The
+   same holds for the cycle of a FLUSH.
 5. After a JALR (and after any exception or interrupt) the CPU sends FLUSH in the cycle after it resolves. Every
    older branch has been reported by then, so FLUSH removes exactly the wrong-path predictions.
 6. In-flight peak: 4 (branches in IF, ID and EX plus the one whose outcome is being reported), equal to the queue
    depth; `FULL` covers a CPU that reports later than this.
+7. **Two requests in one CPU cycle (recommended whenever the CPU clock is at most one eighth of the chip clock,
+   which includes the 1 MHz CPU of IR-07).** The two bubbles of rules 2 and 4 exist only because of rule 1. An
+   adapter that can issue a second request as soon as the first is acknowledged removes both: the misprediction
+   resolve (or FLUSH), then the predict of the branch in IF; or the predict from ID, then the predict from IF. The
+   pair needs at most 7 chip clocks at the pins (measured: 3 for the first, 1 to turn around, 3 for the second),
+   plus the adapter's own synchronisers. Nothing in the chip changes: it is the same protocol, used twice in a
+   cycle.
 
-Results are reported for this contract and, as sensitivity, without the BTB (every branch asks in ID) and with the
-resolve one and two stages later.
+The minimum for rule 1 alone is 4 chip clocks per CPU cycle (measured in the co-simulation: no late answer at 4,
+late answers at 3).
+
+Results are reported for this contract in both adapter modes (docs/cosim.md: one request per cycle;
+docs/cosim_dual.md: rule 7) and, as sensitivity from the exploration model, without the BTB (every branch asks in
+ID) and with the resolve one and two stages later (docs/exploration.md).
 
 Host-side identifier fold (IR-05): `ID = fold10(PC >> 2)`, the XOR of consecutive 10-bit slices of `PC[31:2]`.

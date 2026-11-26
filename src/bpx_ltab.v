@@ -225,12 +225,17 @@ module bpx_wseq (
       a  <= s1;
     end
   end
-  always @(negedge clk) b <= ~a;
   assign wact = a;
   assign busy = s1 | a;
-`ifdef BPX_BEHAV
+`ifdef FORMAL
+  // single-edge model for the proofs: the behavioural tables write on wact and do not use the pulse
+  assign wpulse = 1'b0;
+  always @(posedge clk) b <= 1'b0;
+`elsif BPX_BEHAV
+  always @(negedge clk) b <= ~a;
   assign wpulse = a & b;
 `else
+  always @(negedge clk) b <= ~a;
   (* keep *) sky130_fd_sc_hd__and2_1 u_wp (.A(a), .B(b), .X(wpulse));
 `endif
 endmodule

@@ -4,7 +4,7 @@
 // statistics and the control-port registers; drives the predictor datapath (bpx_pred) and the write sequencer.
 //
 // Read port schedule, one user per cycle, in priority order:
-//   predict   a pending request with a predict part, when no table write is in progress
+//   predict   a pending request with a predict part, in the cycle it executes (no table write in progress)
 //   staging   the commit-side lookup of the oldest in-flight branch, as soon as it has become the oldest
 //   debug     a raw table read for the control port
 // A resolve needs no read: it trains from the staging register.  A predict made with an empty queue is its own
@@ -141,7 +141,10 @@ module bpx_core #(
   assign train  = r_exec & ~freeze;
 
   // read port
-  wire hold_p   = pending & op_p;                                   // keep the port on the predict lookup
+  // The port stays on the predict lookup only in the cycle the predict executes.  (Holding it for every pending
+  // predict deadlocks: a predict that waits for the deferred resolve of the previous request, or for the
+  // resolve-first of its own, needs the staging lookup to happen first.  Found by the formal liveness proof.)
+  wire hold_p   = p_exec;
   wire do_stage = ready & ~q_empty & ~stg_v & ~wbusy & ~hold_p & ~clr_exec;
   wire d_tab    = dspace != 3'd7;
   wire drd_exec = drd_pend & (~d_tab | (~wbusy & ~hold_p & ~do_stage & ~clr_exec));
@@ -414,6 +417,144 @@ module bpx_core #(
       dbg <= {evt[dsel1], evt[dsel0]};
     end
   end
+
+`ifdef FORMAL
+  // ================================================================ formal properties (formal/bpx.sby, VR-03)
+  // No assumption is made about the host or the control port: every input is free in every cycle, so each
+  // assertion holds under any protocol misuse and any timing (IR-01, IR-09).  Only reset is assumed at the start.
+  localparam F_N = `FV_QUIET;       // RR-03: cycles of quiet inputs after which the chip must be idle and ready
+  reg f_past = 1'b0;
+  reg f_rs   = 1'b0;                // a reset has been applied: the registers are defined
+  always @(posedge clk) begin
+    f_past <= 1'b1;
+    if (irst) f_rs <= 1'b1;
+  end
+  always @(posedge clk) if (!f_past) assume (rst);
+
+  wire f_idle = ready & ~pending & ~rpend & ~wbusy & ~drd_pend & ~dwr_pend & ~snap_pend & ~clrp_pend & ~init_pend &
+                (q_empty | stg_v);
+  reg          f_req_q;
+  reg  [W-1:0] f_id_q;
+  reg  [1:0]   f_op_q;
+  reg  [5:0]   f_quiet = 6'd0;
+  wire f_activity = irst | reg_we | reg_re | (req_s != f_req_q) | (id_d != f_id_q) | (op_d != f_op_q);
+  always @(posedge clk) begin
+    f_req_q <= req_s;
+    f_id_q  <= id_d;
+    f_op_q  <= op_d;
+    if (!f_past || f_activity) f_quiet <= 6'd0;
+    else if (f_quiet != 6'd63) f_quiet <= f_quiet + 6'd1;
+  end
+
+  // the driving predictions of the in-flight entries, oldest first
+  wire [QW-1:0] f_e0 = qmem[qhead];
+  wire [QW-1:0] f_e1 = qmem[qhead+2'd1];
+  wire [QW-1:0] f_e2 = qmem[qhead+2'd2];
+  wire [QW-1:0] f_e3 = qmem[qhead+2'd3];
+  wire f_d0 = f_e0[W+4], f_d1 = f_e1[W+4], f_d2 = f_e2[W+4], f_d3 = f_e3[W+4];
+
+  always @(posedge clk) if (f_past && f_rs) begin
+    // ---- structural invariants
+    assert (qcnt <= 3'd4);                                           // FR-03: capacity
+    assert (full == (qcnt == 3'd4));
+    assert (!rpend || qcnt != 3'd0);
+    assert (!stg_v || qcnt != 3'd0);
+    assert (!rf_done || seen);                                       // resolve-first done: the request is still waiting
+    assert (!(r_exec && q_empty));                                   // a resolve always has a branch to resolve
+    assert (!(fl_exec && r_exec));
+    assert (!(nop_exec && (p_exec || r_exec)));
+    assert (!(p_refuse && (p_exec || r_exec)));
+    assert (!(r_empty && (p_exec || r_exec)));
+    // ---- FR-04: the speculative history is the committed history followed by the directions the host follows
+    //      for the unresolved branches; with nothing in flight the two are equal
+    case (qcnt)
+      3'd0:    assert (sh == ch);
+      3'd1:    assert (sh == {ch[HL-2:0], f_d0});
+      3'd2:    assert (sh == {ch[HL-3:0], f_d0, f_d1});
+      3'd3:    assert (sh == {ch[HL-4:0], f_d0, f_d1, f_d2});
+      default: assert (sh == {ch[HL-5:0], f_d0, f_d1, f_d2, f_d3});
+    endcase
+    // ---- RR-03: bounded return to idle-and-ready once the inputs are quiet
+    if (f_quiet >= F_N && !f_activity) assert (f_idle);
+
+    if (!$past(irst)) begin
+      // ---- RR-04: the reply changes only together with ACK
+      if (ack == $past(ack)) assert (pred == $past(pred) && conf == $past(conf));
+      // ---- IR-01: exactly one acknowledge per request edge, whatever the timing
+      if (ack != $past(ack)) assert ($past(pending) || !$past(ready));
+      if ($past(ack_t)) assert (ack != $past(ack) && ack == $past(req_s));
+      // ---- FR-03: a request beyond capacity is refused whole; the queue is a FIFO counter
+      if ($past(p_refuse)) assert (qcnt == $past(qcnt) && qhead == $past(qhead) && sh == $past(sh) && ch == $past(ch) && !pred);
+      if ($past(p_exec && !r_exec)) assert (qcnt == $past(qcnt) + 3'd1 && qhead == $past(qhead));
+      if ($past(r_exec && !r_misp && !p_exec)) assert (qcnt == $past(qcnt) - 3'd1 && qhead == $past(qhead) + 2'd1);
+      // ---- FR-04: repair after a mispredicted resolve
+      if ($past(r_misp)) assert (qcnt == 3'd0 && sh == ch && !stg_v && !rpend);
+      // ---- FR-05: flush discards everything in flight, trains nothing, returns to the committed state
+      if ($past(fl_exec)) begin
+        assert (qcnt == 3'd0);
+        assert (sh == ch);
+        assert (ch == $past(ch));
+        assert (!stg_v);
+        assert (!$past(train));
+      end
+      if ($past(fl_exec && !misc_we)) assert (ua_q == $past(ua_q) && lfsr_q == $past(lfsr_q));
+      // ---- FR-01: a predict changes no trained state and starts no table write
+      if ($past(p_exec && !r_exec)) assert (ch == $past(ch) && !$past(train));
+      if ($past(p_exec && !r_exec && !dwr_exec && !snap_exec)) assert (!$past(wcap));
+      if ($past(p_exec && !r_exec && !misc_we)) assert (ua_q == $past(ua_q) && lfsr_q == $past(lfsr_q));
+      if ($past(p_exec && !r_exec && !w_cmd && !(wact && snap_q && sclr_q)))
+        assert (n_res == $past(n_res) && mis0 == $past(mis0) && mis1 == $past(mis1) && mis2 == $past(mis2) && mis3 == $past(mis3));
+      //      trained registers change only by a resolve, a clear or a raw write
+      if (ch != $past(ch)) assert ($past(r_exec) || $past(clr_exec));
+      if (ua_q != $past(ua_q) || lfsr_q != $past(lfsr_q)) assert ($past(train) || $past(misc_we) || $past(clr_exec));
+      if ($past(wcap)) assert ($past(train) || $past(clr_exec) || $past(dwr_tab) || $past(snap_exec));
+      if ($past(train)) assert ($past(r_exec) && !$past(freeze));
+      // ---- IR-09: a resolve with nothing in flight is refused, counted, acknowledged, and changes nothing else
+      if ($past(r_empty)) assert (qcnt == 3'd0 && ch == $past(ch) && sh == $past(sh) && ack != $past(ack) && !$past(train) &&
+                                  ($past(w_cmd) || eflags[0]) &&
+                                  ($past(w_cmd) || $past(err_cnt) == 8'hff || err_cnt == $past(err_cnt) + 8'd1));
+    end
+
+    // ---- cover: each operation completes; a full queue; a misprediction with a full queue and the next predict
+    cover (p_exec && qcnt == 3'd3);
+    cover (p_refuse);
+    cover (r_first);
+    cover (r_same);
+    cover (r_late);
+    cover (r_only && !r_misp);
+    cover (r_only && r_misp && q_full);
+    cover (fl_exec && q_full);
+    cover (nop_exec);
+    cover (r_empty);
+    cover (f_rep && p_exec);
+    cover (f_rep && f_idle && n_res == 3);
+  end
+`ifdef FV_NOSPI
+  // Task "nowait": with a silent control port, which requests can be made to wait?  These assertions justify the
+  // coverage bins marked "cannot occur" in docs/coverage.md: FLUSH, NOP and refused requests are acknowledged in
+  // the first clock they are seen, and so is a RESOLVE that finds the queue full.
+  // A legal host: REQ toggles only after the host has seen ACK (two synchroniser flops later here), and ID/OP
+  // hold while a request is pending.
+  always @(posedge clk) assume (!reg_we && !reg_re);
+  reg f_past2 = 1'b0;
+  always @(posedge clk) f_past2 <= f_past;
+  always @(posedge clk) if (f_past2) begin
+    if (req_s != $past(req_s)) assume ($past(ack, 2) == $past(req_s) && $past(ack) == $past(req_s));
+    if (req_s != ack) assume (id_d == $past(id_d) && op_d == $past(op_d));
+  end
+  always @(posedge clk) if (f_past && f_rs) begin
+    assert (!clrp_pend && !dwr_pend && !snap_pend && !drd_pend);
+    assert (!(nop_exec && seen));
+    assert (!(fl_exec && seen));
+    assert (!(p_refuse && seen));
+    assert (!(r_empty && seen));
+    assert (!(r_only && q_full && seen));
+    assert (!(p_exec && rf_done && !seen));          // queue full: the resolve goes first, the predict a clock later
+  end
+`endif
+  reg f_rep = 1'b0;                 // a misprediction was repaired with the queue full
+  always @(posedge clk) if (f_past && f_rs && r_misp && q_full) f_rep <= 1'b1;
+`endif
 endmodule
 
 // bpx_shadow - snapshot register for the statistics counters: N latches that copy d during the write pulse of a

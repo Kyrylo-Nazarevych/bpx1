@@ -7,20 +7,26 @@ microcontroller, or the Tiny Tapeout demo board) sends a branch identifier and g
 later it reports the real outcome and the chip learns from it. Four predictors run side by side on the same branch
 stream, a tagged geometric-history predictor and three classic references, so algorithms can be compared on silicon.
 
-**Status: gate G0.** The repository currently builds the *area probe* of the storage tables, not the predictor
-(see the header of `src/tt_um_kyrylo_nazarevych_bpx1.v`). The predictor RTL replaces it at gate G2.
+**Status: gate G2 passed, G3 in progress.** The repository builds the real chip. The design is frozen; the RTL equals
+the golden model on every benchmark program and on random operations. Start with `docs/HANDOVER.md`.
 
 | Where | What |
 | --- | --- |
+| `docs/HANDOVER.md` | State, decisions, next steps, commands. |
 | `docs/SPEC.md` | Design specification: pins, host protocol, control port, microarchitecture, the CPU contract. |
 | `docs/spec_review.md` | Review of the requirements specification and the owners' decisions on it. |
+| `docs/exploration.md` | How the predictor was chosen: 71 programs, 16 families, held-out validation. |
+| `docs/cosim.md`, `docs/verification.md`, `docs/coverage.md` | Results on the RTL: speedup and accuracy per program, golden-model equivalence, formal proofs, coverage. |
+| `docs/area.md`, `docs/timing.md` | Chip build: utilisation, timing per corner. |
 | `docs/info.md`, `info.yaml` | Tiny Tapeout datasheet page and project description. |
 | `src/` | Verilog sources of the chip. `bpx_ltab.v`: the latch table and its write sequencer. |
-| `model/bpx1.py` | Golden model: the executable form of the protocol and the predictor algorithm. |
+| `model/` | Golden model `bpx1.py`: the executable form of the protocol and the predictor algorithm; random-test generator. |
 | `explore/` | Design-space exploration: `bpsim.cc` (candidate predictors inside the CPU timing model), `sweep.py`. |
 | `bench/` | Benchmark programs (RV32IM, run in Spike) and the event-trace format the CPU model replays. |
-| `test/` | cocotb tests (RTL and gate level). |
-| `tools/wsl_sync.sh` | Mirrors this folder into the Linux file system, where every tool runs. |
+| `cosim/` | System co-simulation: the CPU contract against the RTL (Verilator), random operations, coverage. |
+| `formal/` | SymbiYosys proofs of the properties at the end of `src/bpx_core.v`. |
+| `test/` | cocotb tests (RTL and gate level), run by CI. |
+| `tools/` | `wsl_sync.sh` mirrors this folder into the Linux file system, where every tool runs; `harden.sh` builds the chip locally. |
 
 ## Building
 
@@ -32,8 +38,11 @@ bash tools/wsl_sync.sh                      # from the project folder: mirror in
 cd ~/work/bpx1
 bash bench/build.sh                         # build, run and trace the benchmark programs -> out/bench/
 python3 explore/sweep.py run families       # explore predictor families -> out/explore/
-cd test && make -B                          # RTL test
-./tt/tt_tool.py --pdk sky130A --create-user-config && ./tt/tt_tool.py --pdk sky130A --harden   # chip flow
+cd test && make -B                          # RTL test against the golden model (cocotb)
+bash cosim/run.sh && python3 cosim/report.py    # every program against the RTL -> docs/cosim.md
+bash cosim/random.sh 10 100000              # 10 x 100,000 random operations, coverage -> docs/coverage_bins.md
+bash formal/run.sh                          # formal proofs
+bash tools/harden.sh                        # chip flow (LibreLane) and gate-level test
 ```
 
 ## Licence
