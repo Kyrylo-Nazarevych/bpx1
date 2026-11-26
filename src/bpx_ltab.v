@@ -21,6 +21,12 @@
 //
 // clr = 1 (captured like a write) loads INIT into every entry with one pulse.
 //
+// DYN = 1: dynamic (leaky) storage, an experiment.  Each bit is the output node of a tri-state inverter
+// (sky130_fd_sc_hd__einvp_1) that is enabled only during the write pulse; afterwards the node floats and holds
+// its charge on the gate capacitance of the read tree until leakage takes it.  No refresh here.  A third of the
+// area of a latch.  The read tree isolates every unselected entry (its select input is 0), so a half-discharged
+// node can draw current only in the entry being read.  Gate-level simulation shows these nodes as unknown.
+//
 // Define BPX_BEHAV for a flip-flop model with the same cycle behaviour (formal proofs, fast simulation).
 `default_nettype none
 
@@ -29,7 +35,8 @@ module bpx_ltab #(
     parameter RW = 3,                          // row bits (rows = 2^RW = 4, 8 or 16; columns = 2^(AW-RW))
     parameter EW0 = 2,                         // field 0 width (>= 1)
     parameter EW1 = 0,                         // field 1 width (0 = no second field)
-    parameter [EW0+EW1-1:0] INIT = 0           // value after clr
+    parameter [EW0+EW1-1:0] INIT = 0,          // value after clr
+    parameter DYN = 0                          // 1: dynamic storage nodes instead of latches
 ) (
     input  wire               clk,
     input  wire               wcap,            // capture the write request at this clock edge
@@ -94,6 +101,7 @@ module bpx_ltab #(
   wire [ROWS-1:0] rp;                      // row select AND pulse
   wire [RW-1:0]   wrow = waddr_q[AW-1:CW];
   wire            wany = we0_q | we1_q;
+  wire [EW-1:0]   wdata_n = ~wdata_q;      // the dynamic cell is an inverter
   genvar r, c, b;
   generate
     for (r = 0; r < ROWS; r = r + 1) begin : g_row
@@ -109,10 +117,18 @@ module bpx_ltab #(
       end
       wire cf0 = csel & (clr_q | we0_q);
       for (r = 0; r < ROWS; r = r + 1) begin : g_r0
-        wire g_n;
-        (* keep *) sky130_fd_sc_hd__nand2_1 u_g (.A(rp[r]), .B(cf0), .Y(g_n));
-        for (b = 0; b < EW0; b = b + 1) begin : g_b
-          (* keep *) sky130_fd_sc_hd__dlxtn_1 u_bit (.D(wdata_q[b]), .GATE_N(g_n), .Q(q[(r*COLS+c)*EW+b]));
+        if (DYN) begin : g_dyn
+          wire g;
+          (* keep *) sky130_fd_sc_hd__and2_1 u_g (.A(rp[r]), .B(cf0), .X(g));
+          for (b = 0; b < EW0; b = b + 1) begin : g_b
+            (* keep *) sky130_fd_sc_hd__einvp_1 u_bit (.A(wdata_n[b]), .TE(g), .Z(q[(r*COLS+c)*EW+b]));
+          end
+        end else begin : g_lat
+          wire g_n;
+          (* keep *) sky130_fd_sc_hd__nand2_1 u_g (.A(rp[r]), .B(cf0), .Y(g_n));
+          for (b = 0; b < EW0; b = b + 1) begin : g_b
+            (* keep *) sky130_fd_sc_hd__dlxtn_1 u_bit (.D(wdata_q[b]), .GATE_N(g_n), .Q(q[(r*COLS+c)*EW+b]));
+          end
         end
       end
       if (EW1 > 0) begin : g_f1
@@ -127,7 +143,7 @@ module bpx_ltab #(
       end
     end
   endgenerate
-  wire _unused_struct = &{1'b0, wact};
+  wire _unused_struct = &{1'b0, wact, wdata_n};
 `endif
 
   // ---------------------------------------------------------------- read
