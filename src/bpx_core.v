@@ -150,7 +150,7 @@ module bpx_core #(
   // write port
   wire dwr_exec = dwr_pend & ~wbusy & ~r_exec & ~clr_exec;
   assign dwr_tab = dwr_exec & d_tab;
-  assign misc_we = dwr_exec & ~d_tab & (da[3:0] == 4'd4);
+  assign misc_we = dwr_exec & ~d_tab & (da[2:0] == 3'd4);
   wire snap_exec = snap_pend & ~wbusy & ~r_exec & ~clr_exec & ~dwr_exec;
   assign wreq    = clr_exec | train | dwr_tab | snap_exec;
 
@@ -158,28 +158,18 @@ module bpx_core #(
   wire [3:0] preds = {p_trn, p_gsh, p_bim, p_def};
   wire       pdrv  = drive[2] ? 1'b0 : preds[drive[1:0]];
 
-  // small registers visible through the raw access port (space 7)
+  // small registers visible through the raw access port (space 7): histories, use-alternate counter and LFSR
   reg [11:0] misc;
   wire [23:0] ch24 = ch;            // zero-extended
   wire [23:0] sh24 = sh;
-  wire [35:0] stg36 = stg;
-  wire [15:0] q0 = qmem[0], q1 = qmem[1], q2 = qmem[2], q3 = qmem[3];
   always @* begin
-    case (da[3:0])
-      4'd0:    misc = ch24[11:0];
-      4'd1:    misc = ch24[23:12];
-      4'd2:    misc = sh24[11:0];
-      4'd3:    misc = sh24[23:12];
-      4'd4:    misc = {lfsr_q, ua_q};
-      4'd5:    misc = stg36[11:0];
-      4'd6:    misc = stg36[23:12];
-      4'd7:    misc = stg36[35:24];
-      4'd8:    misc = {5'd0, rpend, stg_v, qhead, qcnt};
-      4'd12:   misc = q0[11:0];
-      4'd13:   misc = q1[11:0];
-      4'd14:   misc = q2[11:0];
-      4'd15:   misc = q3[11:0];
-      default: misc = {q3[14:12], q2[14:12], q1[14:12], q0[14:12]};
+    case (da[2:0])
+      3'd0:    misc = ch24[11:0];
+      3'd1:    misc = ch24[23:12];
+      3'd2:    misc = sh24[11:0];
+      3'd3:    misc = sh24[23:12];
+      3'd4:    misc = {lfsr_q, ua_q};
+      default: misc = {5'd0, rpend, stg_v, qhead, qcnt};
     endcase
   end
 

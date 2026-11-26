@@ -30,6 +30,13 @@ sed -e 's/^    - "bpx_ltab.v"$/    - "bpx_ltab.v"\n    - "bpx_pred.v"\n    - "bp
 # drive-strength-1 gates allowed: the PDK's synthesis exclusion list without its plain _1 logic gates and flop
 T=$PDK_ROOT/$PDK/libs.tech/openlane/sky130_fd_sc_hd
 grep -v -E '__(a[0-9]+[a-z]*|o[0-9]+[a-z]*|and[0-9]b*|or[0-9]b*|nand[0-9]b*|nor[0-9]b*|xor2|xnor2|inv|dfxtp)_1$' $T/no_synth.cells > $D/src/synth_exclude_small.cells
+# place-and-route exclusion list for extra configs that ask for it: the PDK's list plus the slow delay cells the
+# resizer otherwise uses as fan-out buffers (about 1 ns each at the slow corner)
+{ cat $T/drc_exclude.cells; printf 'sky130_fd_sc_hd__clkdlybuf4s25_1
+sky130_fd_sc_hd__clkdlybuf4s25_2
+sky130_fd_sc_hd__clkdlybuf4s50_1
+sky130_fd_sc_hd__clkdlybuf4s50_2
+'; } > $D/src/pnr_exclude.cells
 python3 - "$S" "$D" "$DENS" "$PERIOD" "$CELLS" "$EXTRA" <<'EOF'
 import json, sys
 s, d, dens, per, cells, extra = sys.argv[1:7]

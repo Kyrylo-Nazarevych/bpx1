@@ -6,11 +6,11 @@ Everything a fresh session needs to continue: state, decisions, next steps, comm
 ## 1. State in one paragraph
 
 BPX-1 is a branch-prediction coprocessor for Tiny Tapeout (SKY130, 2×2 tiles). The protocol and the predictor are
-**frozen**; the RTL exists and equals the golden model on random operations; the storage technique has passed the
-complete flow, CI and precheck in an area probe. **Not done:** the real RTL is not yet the repository top (it is
-7–8 % too large with the flow's default cells; a trial build with small cells allowed is the open item), benchmark
-runs against RTL (VR-01 on programs, VR-06), formal proofs, coverage, gate-level test of the real design, and most
-DR-03/DR-05 documents.
+**frozen**; **the real RTL is the repository top**, equals the golden model in RTL and at gate level on random
+operations and a trace replay, and builds locally clean (75.9 % utilisation, DRC/LVS/antenna 0, all corners met at
+40 MHz). **Not done:** reading the CI run of that push, benchmark programs against RTL (VR-01 on programs, VR-06,
+PF-01…03 from RTL), 10⁶ random operations, formal proofs, coverage, and `docs/coverage.md`, `verification.md`,
+`bringup.md`, the host kit.
 
 ## 2. Where things are
 
@@ -60,16 +60,10 @@ Repository layout: `src/` RTL; `model/bpx1.py` golden model; `test/` cocotb; `ex
 
 ## 5. Next steps, in order
 
-1. **Area closure (gate G2 blocker).** Read the trial build `~/work/bpx1-trial-a` (small cells, density 84, 20 ns):
-   `bash tools/trial_build.sh a 84 20 small` prints the digest. Then run the planned 2×2 around it, one build at a
-   time (each about 20 minutes): cells {default, small} × density {80, 86}, plus clock 15 ns on the best. If small
-   cells pass DRC/LVS/antenna and the gate-level test, commit `src/synth_exclude_small.cells`, set
-   `SYNTH_EXCLUDED_CELL_FILE` in `src/config.json`, and document it in `docs/area.md` (AL-02, with the default
-   list as fallback). If it does not fit: cut `bpx_core` (raw-access paths, queue readout) before cutting a table.
-2. **Make the RTL the repository top.** Replace the probe in `src/tt_um_kyrylo_nazarevych_bpx1.v` by a wrapper
-   around `bpx_chip`; list all sources in `info.yaml` and `test/Makefile`; turn `test/test_bpx.py` into
-   `test/test.py` with a short trace replay and a random subset that also runs at gate level; `tools/harden.sh`;
-   push; read CI.
+1. **Read the CI run** of the commit that made the RTL the top (`gh run list -R Kyrylo-Nazarevych/bpx1`): gds,
+   precheck and gl_test must be green; compare its utilisation with the local 75.9 % / 74.3 %.
+2. Done: area closure and top switch (docs/area.md, docs/timing.md). Open improvements: slew warnings at the slow
+   corner; 50 MHz by registering the lookup one clock earlier; the default-cell and density-86 trial builds.
 3. **VR-06 / VR-01 on programs.** Verilator harness (`cosim/`): the CPU contract replaying `out/bench/*/prog.evt`
    against the RTL through the pins, including wrong-path predicts (decode `prog.text`) and FLUSH on JALR; log the
    operation stream; replay it through `model/bpx1.py`. Cross-check cycles and mispredictions against

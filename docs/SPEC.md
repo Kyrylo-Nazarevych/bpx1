@@ -158,7 +158,7 @@ single steps. Raw table reads use cycles the predict port leaves free and never 
 
 Raw entries: space 0 `{chooser[1:0], bimodal[1:0]}`; space 1 `gshare[1:0]`; tagged `{u[1:0], tag, ctr[2:0]}`.
 Space 7: 0–1 committed history, 2–3 speculative history (12 bits each), 4 `{LFSR[7:0], use-alternate[3:0]}`
-(writable), 5–7 staging register, 8 queue pointers, 9–15 queue entries. Every bit of predictor state and
+(writable), 5 queue pointers and flags. Every bit of predictor state and
 configuration is readable while requests run (FR-10); tables and the two small predictor registers are writable.
 
 DBG events (CTRL): 1 request seen, 2 predict done, 3 resolve done, 4 misprediction repair, 5 flush, 6 refusal or
