@@ -234,6 +234,74 @@ def stage_chips2():
     return c
 
 
+def stage_rand(n=3000, seed=20261127):
+    """Broad stratified random sample of the whole whole-chip parameter space (every factor's levels are used
+    equally often, in independently shuffled order: a Latin-hypercube sample over discrete levels), to check that
+    no region away from the refined candidates does better, and to estimate each factor's main effect."""
+    import random
+    rng = random.Random(seed)
+    levels = dict(nb=[16, 32, 64, 128, 256], ng=[32, 64, 128, 256, 512], ghf=[0.0, 0.25, 0.5, 0.75, 1.0], nt=[1, 2, 3, 4],
+                  e=[8, 16, 32, 64], tb=[4, 5, 6, 7, 8, 9, 10], lmin=[2, 3, 4, 5, 6, 8], lmax=[8, 12, 16, 20, 24, 32, 40],
+                  cb=[2, 3], ub=[1, 2], ua=[0, 3, 4, 5], alloc=[0, 1], base=["bim", "trn"], chist=[0, 1], altw=[0, 1], grow=[0, 1, 2])
+    cols = {}
+    for k, lv in levels.items():
+        col = [lv[i % len(lv)] for i in range(n)]
+        rng.shuffle(col)
+        cols[k] = col
+    out, seen = [], set()
+    for i in range(n):
+        v = {k: cols[k][i] for k in levels}
+        lgg = v["ng"].bit_length() - 1
+        gh = round(v["ghf"] * min(lgg, 10))
+        nt = v["nt"]
+        # grow: 0 = equal tables, 1 = longer-history tables twice as large (capped), 2 = shorter-history tables larger
+        te = [min(64, v["e"] * (2 if (v["grow"] == 1 and j >= nt // 2 and nt > 1) or (v["grow"] == 2 and j < nt // 2) else 1)) for j in range(nt)]
+        th = sorted(set(geo(v["lmin"], max(v["lmax"], v["lmin"] + nt), nt)))
+        while len(th) < nt:
+            th.append(th[-1] + 2)
+        kw = dict(base=v["base"], cb=v["cb"], ub=v["ub"], ua=v["ua"], alloc=v["alloc"], altw=v["altw"])
+        if v["base"] == "trn" and v["chist"]:
+            kw.update(chist=1)
+        if v["alloc"]:
+            kw.update(lw=8)
+        line = chip_line(v["nb"], v["ng"], gh, te, [v["tb"]] * nt, th, tag=f"_r{i}", **kw)
+        _, _, p = parse_line(line)
+        if chip_cost(p)[0] <= 2400 and line.split()[0] not in seen:
+            seen.add(line.split()[0])
+            out.append(line)
+    return out
+
+
+def effects(tag="rand", subset="tune", cap=2400):
+    """Main effect of each factor in a random-sample run: mean accuracy of the candidates at each level, after
+    removing the storage trend (accuracy regressed on log2 of chip bits), and the share of the remaining variance
+    each factor explains (one-way ANOVA eta squared)."""
+    agg = [x for x in load_chips(tag, subset) if x["cbits"] <= cap]
+    xs = [math.log2(x["cbits"]) for x in agg]
+    ys = [x["acc_cpu"] for x in agg]
+    n = len(agg)
+    mx, my = sum(xs) / n, sum(ys) / n
+    b = sum((a - mx) * (c - my) for a, c in zip(xs, ys)) / sum((a - mx) ** 2 for a in xs)
+    res = [c - my - b * (a - mx) for a, c in zip(xs, ys)]
+    sst = sum(r * r for r in res)
+    print(f"{n} random candidates ({subset} programs); accuracy = {my:.2f} % + {b:.2f} points per doubling of storage; residual sd {math.sqrt(sst / n):.3f}")
+    fac = dict(tables=lambda p: len(p["te"].split(",")), base=lambda p: "trn" if "gn" in p else "bim", tag_bits=lambda p: int(p["tt"].split(",")[0]),
+               ctr_bits=lambda p: p["cb"], useful_bits=lambda p: p["ub"], use_alt_bits=lambda p: p["ua"], alloc_lfsr=lambda p: p["alloc"],
+               alt_update=lambda p: p.get("altw", "1"), chooser_by_history=lambda p: p.get("chist", "0"), bimodal=lambda p: int(p["bn"]),
+               gshare=lambda p: int(p["rng"]), gshare_hist=lambda p: int(p["rgh"]), longest_hist=lambda p: int(p["th"].split(",")[-1]),
+               shortest_hist=lambda p: int(p["th"].split(",")[0]), entries_first=lambda p: int(p["te"].split(",")[0]))
+    rows = []
+    for name, f in fac.items():
+        g = {}
+        for x, r in zip(agg, res):
+            g.setdefault(f(x["params"]), []).append(r)
+        ssb = sum(len(v) * (sum(v) / len(v)) ** 2 for v in g.values())
+        rows.append((ssb / sst, name, g))
+    for eta, name, g in sorted(rows, key=lambda t: -t[0]):
+        lv = "  ".join(f"{k}:{sum(v) / len(v):+.2f}" for k, v in sorted(g.items(), key=lambda kv: (isinstance(kv[0], str), kv[0])))
+        print(f"  {name:20s} explains {100 * eta:5.1f} %   level means (points, storage trend removed): {lv}")
+
+
 def parse_line(line):
     t = line.split()
     return t[0], t[1], dict(x.split("=", 1) for x in t[2:])
@@ -269,9 +337,9 @@ def chip_cost(params):
     return bits, area
 
 
-def load_chips(tag="chips"):
+def load_chips(tag="chips", subset=None):
     """Aggregate of a chips run with chip bits and area attached (cbits, carea)."""
-    agg = aggregate(os.path.join(OUT, tag + ".tsv"))
+    agg = aggregate(os.path.join(OUT, tag + ".tsv"), subset)
     par = {}
     for line in open(os.path.join(OUT, tag + ".cfg")):
         if line.strip():
@@ -298,7 +366,7 @@ def report_chips(tag="chips", caps=(900, 1000, 1100, 1200, 1300, 1400, 1500, 170
         print(row(x))
 
 
-STAGES = {"refs": stage_refs, "families": stage_families, "chips": stage_chips, "chips2": stage_chips2}
+STAGES = {"refs": stage_refs, "families": stage_families, "chips": stage_chips, "chips2": stage_chips2, "rand": stage_rand}
 
 
 # ------------------------------------------------------------------------------------------- run / aggregate
@@ -313,8 +381,28 @@ def run(stage, cands, opts):
     return tsv
 
 
-def aggregate(tsv):
-    rows = list(csv.DictReader(open(tsv), delimiter="\t"))
+# Programs kept out of every aggregate (owners' decision, 27 Nov 2026): a home-made sqrt dominates their branches.
+EXCLUDE = {"embench.nbody", "embench.cubic"}
+
+
+def split(programs):
+    """Tuning / held-out split by program family: within each family (name before the dot), sorted by name, every
+    fourth program starting with the third is held out (about a quarter).  Designs are chosen on the tuning set only."""
+    fam = {}
+    for p in sorted(programs):
+        fam.setdefault(p.split(".")[0], []).append(p)
+    hold = {p for ps in fam.values() for i, p in enumerate(ps) if i % 4 == 2}
+    return set(programs) - hold, hold
+
+
+def aggregate(tsv, subset=None):
+    """subset: None = all programs (minus EXCLUDE), 'tune' or 'hold' = that part of the split."""
+    subset = subset or os.environ.get("BPX_SET")
+    rows = [r for r in csv.DictReader(open(tsv), delimiter="\t") if r["program"] not in EXCLUDE]
+    if subset in ("tune", "hold"):
+        tune, hold = split({r["program"] for r in rows})
+        keep = tune if subset == "tune" else hold
+        rows = [r for r in rows if r["program"] in keep]
     by = {}
     for r in rows:
         by.setdefault(r["config"], []).append(r)
@@ -390,6 +478,8 @@ def main():
         show(agg, int(opts.get("top", 40)), opts.get("sort", "speedup"), opts.get("flt"))
     elif cmd == "chips":
         report_chips(stage)
+    elif cmd == "effects":
+        effects(stage, *sys.argv[3:4])
     elif cmd == "pareto":
         for st in sys.argv[2:]:
             plot(st, aggregate(os.path.join(OUT, st + ".tsv")))

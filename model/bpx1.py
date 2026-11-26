@@ -39,12 +39,12 @@ class Config:
     NG: int = 128                     # gshare entries (2-bit)
     HG: int = 6                       # gshare history bits
     # tagged tables of the default predictor: (entries, tag bits, history length), shortest history first
-    tagged: List[Tuple[int, int, int]] = field(default_factory=lambda: [(32, 7, 4), (32, 7, 14)])
+    tagged: List[Tuple[int, int, int]] = field(default_factory=lambda: [(16, 7, 4), (16, 7, 9), (16, 7, 20)])
     CB: int = 3                       # tagged counter bits
-    UB: int = 1                       # tagged useful bits
+    UB: int = 2                       # tagged useful bits
     UA: int = 4                       # use-alternate counter bits (0 = off)
-    base_tournament: bool = False     # default predictor's base: False = bimodal, True = tournament
-    alloc_lfsr: bool = False          # allocation choice: False = shortest free table, True = LFSR-weighted
+    base_tournament: bool = True      # default predictor's base: True = the tournament, False = bimodal
+    alloc_lfsr: bool = True           # allocation choice: True = 8-bit LFSR among the free tables, False = shortest
     DEPTH: int = 4                    # in-flight capacity
     STATW: int = 20                   # statistics counter width
     ERRW: int = 8                     # error counter width
@@ -106,7 +106,7 @@ class Bpx1:
         self.gsh = [1] * c.NG
         self.tt = [[[0, self.half - 1, 0] for _ in range(e)] for e, _, _ in c.tagged]   # [tag, ctr, u]
         self.ua = self.ua_mid
-        self.lfsr = 0xACE1
+        self.lfsr = 0xE1
         self.ch = 0                              # committed history, bit 0 = most recent outcome
         self.sh = 0                              # speculative history
         self.queue = []                          # in-flight: dicts id, preds(4), pdrv
@@ -190,7 +190,7 @@ class Bpx1:
             if cand:
                 pick = 0
                 if c.alloc_lfsr:
-                    self.lfsr = (self.lfsr >> 1) ^ (0xB400 if self.lfsr & 1 else 0)
+                    self.lfsr = (self.lfsr >> 1) ^ (0xB8 if self.lfsr & 1 else 0)
                     while pick < len(cand) - 1 and (self.lfsr >> pick) & 1:
                         pick += 1
                 j = cand[pick]

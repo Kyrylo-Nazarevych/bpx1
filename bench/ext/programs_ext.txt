@@ -1,0 +1,33 @@
+# BPX-1 external benchmark manifest (read by bench/ext/build_ext.sh; explained in bench/ext/README.md).
+# One line per program, five fields without spaces inside:
+#
+#     name  suite  pinned-commit  licence  scale
+#
+# name: output folder out/bench/<name>. embench.<directory under src/>, coremark, mibench.<driver>.
+# pinned-commit: full hash of the commit that is fetched; the same on every line of a suite.
+# licence: as stated upstream at that commit.
+# scale: macro definitions for the compiler, separated by commas. CPU_MHZ and ITERATIONS are the
+#     suites' own knobs; GOLDEN is the checksum that belongs to a MiBench scale (test/mibench_host.sh).
+embench.aha-mont64      embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=2
+embench.crc32           embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=3
+embench.cubic           embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=1
+embench.edn             embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=2
+embench.huffbench       embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=2
+embench.matmult-int     embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=2
+embench.minver          embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=1
+embench.nbody           embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=1
+embench.nettle-aes      embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=5
+embench.nettle-sha256   embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=5
+embench.nsichneu        embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=1
+embench.picojpeg        embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=2
+embench.qrduino         embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=2
+embench.sglib-combined  embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=2
+embench.slre            embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=2
+embench.st              embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=2
+embench.statemate       embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=6
+embench.ud              embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=2
+embench.wikisort        embench   0466a18e4f6b47e19598d7c6ba72916d54b68f65  GPL-3.0-or-later  CPU_MHZ=4
+coremark                coremark  1f483d5b8316753a742cbf5590caf5bd0a4e4777  Apache-2.0        ITERATIONS=20
+mibench.bitcount        mibench   0f3cbcf6b3d589a2b0753cfb9289ddf40b6b9ed8  public-domain(SNIPPETS)  ITERATIONS=15000
+mibench.dijkstra        mibench   0f3cbcf6b3d589a2b0753cfb9289ddf40b6b9ed8  GPL(no-version-stated)   PATHS=4,GOLDEN=0x248943
+mibench.adpcm           mibench   0f3cbcf6b3d589a2b0753cfb9289ddf40b6b9ed8  HPND(CWI)                SAMPLES=64000,GOLDEN=0x1a1192

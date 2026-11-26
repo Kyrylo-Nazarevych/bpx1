@@ -1,0 +1,23 @@
+# RTL simulation of the BPX-1 chip level against the golden model (test_bpx.py).
+#   make -B -f Makefile.bpx              structural latch tables, behavioural cell models
+#   make -B -f Makefile.bpx BEHAV=yes    flip-flop model of the tables (faster)
+SIM ?= icarus
+TOPLEVEL_LANG ?= verilog
+SRC_DIR = $(PWD)/../src
+PROJECT_SOURCES = bpx_ltab.v bpx_pred.v bpx_core.v bpx_spi.v bpx_chip.v
+
+VERILOG_SOURCES += $(addprefix $(SRC_DIR)/,$(PROJECT_SOURCES))
+ifeq ($(BEHAV),yes)
+SIM_BUILD     = sim_build/bpx_behav
+COMPILE_ARGS += -DBPX_BEHAV
+else
+SIM_BUILD     = sim_build/bpx
+VERILOG_SOURCES += $(PWD)/sky130_cells_sim.v
+endif
+COMPILE_ARGS += -I$(SRC_DIR)
+VERILOG_SOURCES += $(PWD)/tb_bpx.v
+TOPLEVEL = tb_bpx
+COCOTB_TEST_MODULES = test_bpx
+COCOTB_RESULTS_FILE = results_bpx.xml
+
+include $(shell cocotb-config --makefiles)/Makefile.sim
