@@ -20,9 +20,12 @@ earlier from the captured identifier (it hides in the synchroniser delay and add
 **Latency and the CPU clock it serves (O3, IR-07).** The acknowledge and the prediction leave the chip at the third
 clock edge after `REQ` arrives: at most 3 × 25 ns plus output delay. With the 20 ns round trip of the pads and about
 10 ns in the FPGA to synchronise `ACK`, a prediction is back within about 105 ns **(ESTIMATED: clock periods plus
-the platform figures of C-03; to be measured in the co-simulation)**, so a CPU of up to about 9 MHz gets its answer
-in the cycle it asks. In simulation the acknowledge comes 3 clocks after the request in 93 % of requests, and 4 to
-6 clocks when a request arrives while the training of the previous one is still being written **(VERIFIED)**.
+the platform figures of C-03)**, so a CPU of up to about 9 MHz gets its answer in the cycle it asks. Measured in
+the co-simulation at the pins **(VERIFIED)**: with one request per CPU cycle no answer is late at 4 chip clocks per
+CPU cycle (some are at 3), and in the CPU runs every acknowledge comes exactly 3 clocks after the request (475
+million requests); two requests in one CPU cycle need 7 chip clocks (SPEC 9, rule 7). Back-to-back requests in
+the random tests are acknowledged after 3 clocks in 92 % of cases and after 4 to 6 clocks when the training of the
+previous resolve is still being written **(VERIFIED)**.
 
 **What static timing does not cover.** The data and gate pins of the 1,168 latches are reported as unconstrained:
 no clock reaches a latch, by design (docs/SPEC.md 6.2). Their timing holds by construction: data and select terms

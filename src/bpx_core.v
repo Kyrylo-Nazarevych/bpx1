@@ -331,7 +331,10 @@ module bpx_core #(
       full <= qcnt_n == 3'd4;
 
       // -------- handshake and misuse
-      if (ack_t) ack <= ~ack;
+      if (ack_t) begin
+        ack     <= ~ack;
+        rf_done <= 1'b0;                            // also if the host changed OP in mid-request (misuse)
+      end
       seen <= pending & ~ack_t;
       if (seen & ~pending & ready) rf_done <= 1'b0; // request withdrawn
       if (err_ev) begin

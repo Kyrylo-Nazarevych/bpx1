@@ -1,81 +1,93 @@
 # BPX-1 handover
 
-Everything a fresh session needs to continue: state, decisions, next steps, commands. Written at gate G1
-(27 Nov 2026). Evidence labels as in the requirements specification, section 10. Read `docs/SPEC.md` next.
+Everything a fresh session needs to continue: state, decisions, next steps, commands. Last rewritten at the end of
+the verification round (gate G3 work, 26 Nov 2026). Evidence labels as in the requirements specification,
+section 10. Read `docs/SPEC.md` next, then `docs/verification.md`.
 
 ## 1. State in one paragraph
 
 BPX-1 is a branch-prediction coprocessor for Tiny Tapeout (SKY130, 2×2 tiles). The protocol and the predictor are
-**frozen**; **the real RTL is the repository top**, equals the golden model in RTL and at gate level on random
-operations and a trace replay, and builds locally clean (75.9 % utilisation, DRC/LVS/antenna 0, all corners met at
-40 MHz). **Not done:** reading the CI run of that push, benchmark programs against RTL (VR-01 on programs, VR-06,
-PF-01…03 from RTL), 10⁶ random operations, formal proofs, coverage, and `docs/coverage.md`, `verification.md`,
-`bringup.md`, the host kit.
+**frozen**; the real RTL is the repository top and builds clean in CI. The RTL equals the golden model on all 71
+benchmark programs inside the CPU co-simulation and on 10⁶ random operations; functional coverage is complete;
+the control properties are proven formally (unbounded). The formal work found and fixed **two RTL defects** after
+gate G2 (a read-port deadlock, and a stale flag after a malformed request). Measured on the RTL: the default
+predictor makes the U1 CPU 1.1317× faster than static not-taken (1.1353× with the two-requests-per-cycle adapter) at
+91.24 % accuracy, ahead of every reference predictor on speedup and accuracy, and worse than the best reference on
+no program. **Not done:** see section 5.
 
 ## 2. Where things are
 
 | What | Where |
 | --- | --- |
-| Project folder (source of truth, Windows) | `C:\\Users\\Kyrylo\\Desktop\\Claude Folder\\Branch Predictor Hackathon 2` |
-| Linux mirror where every tool runs | `~/work/bpx1` (WSL Ubuntu), filled by `tools/wsl_sync.sh`; generated data in `~/work/bpx1/out` |
+| Project folder (source of truth, Windows; **the git repository is here**) | `C:\\Users\\Kyrylo\\Desktop\\Claude Folder\\Branch Predictor Hackathon 2` |
+| Linux mirror where every tool runs | `~/work/bpx1` (WSL Ubuntu), filled by `tools/wsl_sync.sh` (which also overwrites the mirror's `.git`); generated data in `~/work/bpx1/out` |
 | GitHub | `Kyrylo-Nazarevych/bpx1`, public, branch `main`; Pages enabled (source: GitHub Actions) |
 | Requirements | `..\\Branch Predictor Hackaton 1\\plan\\FABLE_ALL_IN_BRIEF.md` (v4.1) and the owners' decisions in `docs/spec_review.md` section 6 |
 | Old prototype | `~/work/tt-branch-predictor` (not to be reused; only its `tt/` support tools are symlinked) |
 
-Repository layout: `src/` RTL; `model/bpx1.py` golden model; `test/` cocotb; `explore/` sweep engine and reports;
-`bench/` benchmarks (`bench/ext` fetches external suites); `tools/` scripts; `docs/` documents.
+Repository layout: `src/` RTL; `model/` golden model, random-test generator, replay; `test/` cocotb (CI);
+`cosim/` Verilator harness, reports, coverage; `formal/` SymbiYosys; `explore/` sweep engine; `bench/` benchmarks;
+`host/` MicroPython host; `tools/` scripts; `docs/` documents.
+
+Generated documents (do not edit by hand): `docs/cosim.md`, `docs/cosim_dual.md` (`cosim/report.py`),
+`docs/coverage_bins.md` (`cosim/coverage.py`), `docs/exploration_tables.md`. They are written in the mirror: copy
+them back to the Windows folder after generating (the sync is one-way, Windows to Linux).
 
 ## 3. Decisions (each with its evidence in the named document)
 
 | # | Decision | Evidence |
 | --- | --- | --- |
 | D1 | Host port: two-phase REQ/ACK, 10-bit ID, 2-bit OP; answer at the third clock after the request. PREDICT+RESOLVE = predict, then resolve the oldest (resolve first if the queue is full). Queue depth 4. | SPEC 2–3; owners accepted the readings of FR-03 and FR-04 |
-| D2 | Control port: SPI mode 0 with 16-bit registers on `uio[4..6]` + `uo[7]` (RP2350 hardware SPI1); all `uio` are inputs. | SPEC 4 |
-| D3 | Storage: latch tables written by flop-generated pulses; one write sequencer; one read port per table; training from a staging register. Clock-derived gates are impossible in this flow (clock-tree synthesis adds 44,700 µm²). | SPEC 6; probes p2–p5 **(VERIFIED)** |
-| D4 | No hard macro: the 32×32 register file is 1.45× denser in practice, has no source, no LVS netlist, no licence. | spec_review 4 **(VERIFIED by the research agent)** |
-| D5 | Predictor: bimodal 64 + chooser 64, gshare 128 (4 history bits), three tagged tables 16 × 12 bits with histories 4/9/20 over the tournament, 8-bit allocation LFSR; 1,088 bits. | SPEC 7; exploration.md **(VERIFIED, model)** |
+| D2 | Control port: SPI mode 0 with 16-bit registers on `uio[4..6]` + `uo[7]`; all `uio` are inputs. | SPEC 4 |
+| D3 | Storage: latch tables written by flop-generated pulses; one write sequencer; one read port per table; training from a staging register. Clock-derived gates are impossible in this flow (clock-tree synthesis adds 44,700 µm²). | SPEC 6; probes **(VERIFIED)** |
+| D4 | No hard macro. | spec_review 4 **(VERIFIED by the research agent)** |
+| D5 | Predictor: bimodal 64 + chooser 64, gshare 128 (4 history bits), three tagged tables 16 × 12 bits with histories 4/9/20 over the tournament, 8-bit allocation LFSR; 1,088 bits. | SPEC 7; exploration.md; cosim.md **(VERIFIED on RTL)** |
 | D6 | U1 CPU contract: five stages with a 256-entry branch-target buffer at fetch; owners delegated the choice. | SPEC 9 |
 | D7 | Benchmark set frozen: 71 programs; `embench.nbody`/`cubic` out of the aggregates; 51 tuning / 18 held-out. | exploration.md 1 |
-| D8 | Statistics: 16-bit saturating counters, snapshot and snapshot-and-clear; no raw writes to the histories. | SPEC 4 (trimmed for area) |
+| D8 | Statistics: 16-bit saturating counters, snapshot and snapshot-and-clear; no raw writes to the histories. | SPEC 4 |
 | D9 | Single clock domain; data pins use one capture flop qualified by the 2-flop synchronised REQ. | `src/bpx_chip.v` header |
+| D10 | CPU adapter: a resolve that reports a misprediction is sent alone; the predict of that cycle follows one cycle later, or in the same cycle if the adapter can send two requests per CPU cycle (needs 8 chip clocks per CPU cycle). No chip change. | SPEC 9 rules 4 and 7; cosim.md against cosim_dual.md **(VERIFIED)** |
+| D11 | The tables' read port is reserved for a predict only in the clock it executes (deadlock fix). | verification.md 4 **(VERIFIED: proof, regression)** |
 
 ## 4. Verified facts worth not rediscovering
 
 - LibreLane's synthesis may not use drive-strength-1 gates (`no_synth.cells`); explicitly instantiated cells are
-  unaffected. Logic costs about 1.6× textbook areas. The read tree is hand-mapped (`bpx_aor`).
+  unaffected. The repository's `src/config.json` allows the small cells and excludes the slow delay buffers.
 - Table cost after synthesis: `550 + entries × (20.5 × bits + 6.5)` µm².
-- Probe (1,344 latch bits + 16.6k logic): 48.9k µm² synthesised → 82–84 % LibreLane utilisation (77 % by
-  `--print-stats`), routing DRC 0, Magic DRC 0, LVS 0, antenna 0, gate-level signature = RTL; **CI green** on commit
-  992f958: gds, precheck, gl_test, viewer, test, docs.
-- Buffers for fan-out and timing add about 19 % to the synthesised area. The slow corner is about 2.1× slower than
-  typical. The resizer uses slow `clkdlybuf4s25` cells as fan-out buffers (worth excluding).
-- Static timing reports the latch data and gate pins as unconstrained (1 per latch); they are safe by construction
-  (SPEC 6.2). About 1,800 slew warnings at the slow corner on the tables' high-fan-out nets.
-- RTL = model: `test/test_bpx.py`, 47,500 random operations in 9 runs, cell-level latch tables and flip-flop
-  model: every reply, the statistics and every state bit read over SPI. Acknowledge 3 clocks after the request in
-  about 93 % of requests, never more than 6 in the test.
-- Whole RTL, Yosys: 57.0k µm² with the flow's default cells, 49.9k with drive-strength-1 gates allowed.
-- `gh` is logged in on Windows. The Vast CLI's `create instance --raw` prints a per-instance key: do not use `--raw`
-  there. `vastai destroy instance` needs `-y`.
+- Local build of the real chip (before the two fixes): 75.9 % utilisation, DRC/LVS/antenna 0, setup +3.35 ns at the
+  slow corner for 25 ns, hold +0.06 ns (docs/area.md, docs/timing.md). CI of `ee6574a` (real chip) and of `dacaf07`
+  (deadlock fix): gds, precheck, gl_test, viewer, test, docs all green.
+- **Commit and push from the Windows folder** (Git Bash or PowerShell; `gh` is logged in there). Never commit in
+  the mirror: the next sync replaces the mirror's `.git` with the Windows one and the commit is gone (this happened
+  once in this round; nothing was lost because the working tree is the Windows folder). A `git push` inside WSL
+  hangs: it has no credential.
+- The co-simulation of all 71 programs takes 18 minutes on this PC with 10 jobs; 10⁶ random operations 35 seconds;
+  the formal tasks 0.5 to 12 minutes each with small tables. Full-size tables make each BMC step 10 to 30 s.
+- Never `pkill -f <pattern>` through `wsl.exe -- bash -c "..."`: the pattern matches the shell that runs it. Put
+  kills in a script file.
+- `explore/bpsim` and the golden model differ slightly for the default predictor (0.03 points of mean accuracy);
+  they agree for the references. Cause not isolated.
+- The Vast CLI's `create instance --raw` prints a per-instance key: do not use `--raw` there. `vastai destroy
+  instance` needs `-y`.
 
 ## 5. Next steps, in order
 
-1. **Read the CI run** of the commit that made the RTL the top (`gh run list -R Kyrylo-Nazarevych/bpx1`): gds,
-   precheck and gl_test must be green; compare its utilisation with the local 75.9 % / 74.3 %.
-2. Done: area closure and top switch (docs/area.md, docs/timing.md). Open improvements: slew warnings at the slow
-   corner; 50 MHz by registering the lookup one clock earlier; the default-cell and density-86 trial builds.
-3. **VR-06 / VR-01 on programs.** Verilator harness (`cosim/`): the CPU contract replaying `out/bench/*/prog.evt`
-   against the RTL through the pins, including wrong-path predicts (decode `prog.text`) and FLUSH on JALR; log the
-   operation stream; replay it through `model/bpx1.py`. Cross-check cycles and mispredictions against
-   `explore/bpsim` (must be equal for the correct path). Report PF-01…PF-03 from RTL.
-4. **Random regression to 10⁶ operations** (VR-01) and functional coverage (VR-02): extend `test_bpx.py` or the
-   Verilator harness; rent a machine for seeds if needed.
-5. **Formal (VR-03)** with SymbiYosys on `BPX_BEHAV`: handshake liveness, queue bounds, FR-01 (predict changes no
-   trained state), FR-05, stable outputs between acknowledges, queue empty ⇒ speculative = committed history.
-6. **Documents:** `docs/area.md`, `timing.md`, `coverage.md`, `verification.md`, `bringup.md`, update `info.md`;
-   MicroPython host and PIO program in `host/`.
-7. Lint clean-up: Verilator still reports width-extension warnings in `bpx_core.v`/`bpx_pred.v` (intended
-   zero-extensions) and one unused bit; LibreLane lists them as warnings, not errors.
+1. **Read the CI run of the last push** (`gh run list -R Kyrylo-Nazarevych/bpx1`): gds, precheck, gl_test (now with
+   the raw-access write test at gate level). Then update docs/area.md and docs/timing.md if the numbers moved (the
+   fixes touch the read-select path; local slack was +3.35 ns). A local `bash tools/harden.sh` gives the numbers CI
+   does not print.
+2. **Owners' decision on D10** (below, section 9) and anything else they want before G3 is declared.
+3. Close the simulation gap that let the deadlock through: a concurrent-control-port mode in `cosim --rand` (SPI
+   commands issued while requests are in flight; replies are order-independent only for some commands, so the
+   generator must restrict itself to snapshot, statistics reads and raw reads). Formal already covers it.
+4. Isolate the `bpsim` / golden-model difference (diff the two on `team.interpreter`, 240k branches: 67 against 65
+   mispredictions), then decide whether docs/exploration.md needs a note beyond the one in verification.md.
+5. Host kit on hardware: `host/bpx1.py` has not run on a demo board; microcotb port of `test/test.py`
+   (docs/bringup.md 6).
+6. Optional improvements, none blocking: slew warnings at the slow corner on the table select nets; 50 MHz by
+   registering the lookup one clock earlier; Verilator width-extension lint warnings; the remaining factorial
+   trial builds (density 86, default cells).
+7. G4: submission to the shuttle is the owners' step.
 
 ## 6. Commands
 
@@ -86,32 +98,36 @@ wsl.exe -d Ubuntu -- bash /home/kyrylo_nazarevych_wsl/work/bpx1/<script>      # 
 
 # inside WSL, ~/work/bpx1  (source ~/ttsetup/env.sh first)
 bash bench/build.sh ; bash bench/ext/build_ext.sh        # benchmarks -> out/bench/<name>/prog.evt (about 2 minutes)
-cd test && make -B -f Makefile.bpx [BEHAV=yes]           # RTL against the golden model; OPS=<n> SEED=<n>
-cd test && make -B [GATES=yes]                           # repository top (the probe today)
+cd test && make -B [GATES=yes]                           # what CI runs: repository top against the golden model
+cd test && make -B -f Makefile.bpx [BEHAV=yes]           # bpx_chip with latch cells or the flip-flop model
+bash cosim/run.sh ; python3 cosim/report.py              # 71 programs against the RTL -> docs/cosim.md
+BPX_DUAL=1 OUT=out/cosim_dual bash cosim/run.sh 16 ; python3 cosim/report.py out/cosim_dual    # -> docs/cosim_dual.md
+bash cosim/random.sh 10 100000                           # random operations, coverage -> docs/coverage_bins.md
+bash formal/run.sh <prove|bmc|cover|nowait|bmcfull>      # formal tasks
 bash tools/harden.sh                                     # local chip build of the repository top + gate-level test
-bash tools/trial_build.sh <tag> <density> <clock_ns> <default|small>   # trial build of bpx_chip
-python3 explore/sweep.py list <refs|families|chips|chips2|rand> <file>  # candidate lists
-out/explore/bpsim btb=256 R=1 [seq=0] <cfg> <out.tsv> out/bench/*/prog.evt
-python3 explore/report.py <refs|families|pick [budget]|sens|charts> ; python3 explore/sweep.py effects rand tune
-python3 model/bpx1.py out/bench/<name>/prog.evt          # golden model replay of one trace
+python3 explore/report.py <refs|families|pick [budget]|sens|charts>     # exploration reports (model)
 ```
-
-Sweeps on a rented machine: build `bpsim` statically (`g++ -O2 -static -pthread`), tar `out/bench/*/prog.evt`
-(13 MB gzipped), copy with the project key `~/.ssh/bpx1_vast_ed25519` (WSL, not in git), run, fetch the `.tsv`
-files into `out/explore/`, **verify they are on disk, then destroy the machine**.
 
 ## 7. Vast.ai account use (owners' rules)
 
 Up to $12 in total; machines labelled `bpx1-*`; never touch others (`fsk-*`); destroy when idle; report the spend at
-every gate. **Spent so far: about $0.80 (ESTIMATED from run times at $0.875/h: 11, 22 and 20 minutes).** One of
-the three runs was wasted: the machine was destroyed before its results were fetched.
+every gate. **Spent so far: about $0.80 (ESTIMATED from run times at $0.875/h), all in the exploration round. The
+verification round used no rented machine:** everything ran on the PC in minutes.
 
 ## 8. Risks
 
 | Risk | Status |
 | --- | --- |
-| Real design does not fit or route | Open: trial builds (step 1). Fallbacks listed there. |
-| Timing at the slow corner: read path about 12–13 ns estimated | Open until the real build; target 50 MHz. A pipeline register hidden in the synchroniser delay is the reserve (SPEC 6 discussion in the session notes: lookup one cycle early from the captured ID). |
-| Latch write paths outside static timing | Accepted by construction; shown at gate level; to be stated in `docs/timing.md`. |
-| Model numbers, not RTL numbers, behind PF-01…03 | Open until step 3. |
+| A defect like the deadlock that neither simulation nor the present proofs see | Reduced, not gone. The proofs cover the sequencer under free inputs; the predictor arithmetic, the SPI shifter and the synchronisers are covered by simulation only. Step 3 above narrows it further. |
+| Latch write paths outside static timing | Accepted by construction; exercised at cell and gate level; bring-up has a procedure for it (docs/bringup.md 4). |
+| Timing after the fixes | Open until the CI run of the last push is read. |
 | Benchmark programs have few branch sites (median 49) | Known limit of small embedded programs; Embench's `nsichneu` (640 sites) is the stress case. |
+| The FPGA CPU does not exist yet | The contract (SPEC 9) is what the numbers assume. Sensitivity: docs/exploration.md (no BTB 1.056×; later resolve 1.198× / 1.258×). |
+
+## 9. Open questions for the owners
+
+1. **D10, the adapter mode to quote for O1.** With one request per CPU cycle the speedup is 1.1317×; with two
+   requests in the cycles that need them it is 1.1353×. The second needs a slightly more complex adapter on the FPGA
+   and a CPU clock of at most one eighth of the chip clock (5 MHz at 40 MHz), which the 1 MHz CPU of IR-07 meets
+   easily. Recommendation: quote both, build the second.
+2. Whether G3 needs the concurrent-control-port simulation (step 3) or the formal proof suffices for it.

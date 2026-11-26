@@ -216,6 +216,53 @@ async def random_ops_against_model(dut):
 
 
 @cocotb.test()
+async def raw_access_write(dut):
+    """Raw writes through the control port (FR-10): whole entries, single fields, neighbours untouched, and the
+    written values are what the predictors then use."""
+    await start(dut)
+    h = Host(dut, random.Random(SEED + 2000))
+
+    async def wr(space, addr, mask, val):
+        await h.spi(0x0F, [(mask << 12) | (space << 8) | addr])
+        await ClockCycles(dut.clk, 8)
+        await h.spi(0x10, [val])
+        await ClockCycles(dut.clk, 12)
+
+    async def rd(space, addr):
+        await h.spi(0x0F, [(space << 8) | addr])
+        await ClockCycles(dut.clk, 8)
+        return (await h.spi(0x10, n=1))[0]
+
+    assert await rd(0, 5) == 0x5, "bimodal/chooser entry is not at its initial value"
+    await wr(0, 5, 3, 0xA)
+    assert await rd(0, 5) == 0xA, "both fields written"
+    await wr(0, 5, 1, 0x7)
+    assert await rd(0, 5) == 0xB, "field 0 only (bimodal counter)"
+    await wr(0, 5, 2, 0x4)
+    assert await rd(0, 5) == 0x7, "field 1 only (chooser)"
+    assert await rd(0, 4) == 0x5 and await rd(0, 6) == 0x5, "neighbours changed"
+    await wr(1, 100, 1, 0x2)
+    assert await rd(1, 100) == 0x2 and await rd(1, 99) == 0x1 and await rd(1, 101) == 0x1, "gshare entry"
+    for t in (2, 3, 4):
+        await wr(t, 9, 3, 0xABC)
+        assert await rd(t, 9) == 0xABC, f"tagged table {t - 2}: whole entry"
+        await wr(t, 9, 1, 0x155)
+        assert await rd(t, 9) == 0x955, f"tagged table {t - 2}: tag and counter only"
+        await wr(t, 9, 2, 0x400)
+        assert await rd(t, 9) == 0x555, f"tagged table {t - 2}: useful bits only"
+        assert await rd(t, 8) == 0x003 and await rd(t, 10) == 0x003, f"tagged table {t - 2}: neighbours changed"
+    await wr(7, 4, 0, 0x5A3)
+    assert await rd(7, 4) == 0x5A3, "use-alternate counter and allocation register"
+    # the bimodal predictor uses the written counter: entry 5 is now strongly taken, entry 4 still weakly not-taken
+    await h.spi(0x01, [0x0001])
+    pred, _, _ = await h.request(bpx1.OP_PREDICT, 5)
+    assert pred == 1, "written bimodal counter not used"
+    pred, _, _ = await h.request(bpx1.OP_PREDICT, 4)
+    assert pred == 0
+    dut._log.info("raw access: entries, single fields and small registers written and read back")
+
+
+@cocotb.test()
 async def trace_replay(dut):
     """One request per trace record, as the demo board replays a recorded trace (U2)."""
     rng = random.Random(SEED + 1000)

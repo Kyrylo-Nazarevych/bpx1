@@ -59,4 +59,4 @@ statistics and soft reset in the middle of the stream.
 | Sub-clock host timing (edges anywhere inside a clock period) | `test/test.py` (cocotb, RTL and gate level): request edges at random picosecond offsets |
 | A request withdrawn before its acknowledge (counted as misuse) | formal: the inputs are free, so `REQ` may toggle at any time |
 | A control-port command in the same clock as a request | formal, as above |
-| Raw-access writes to the tables | not tested by simulation; see docs/verification.md, open items |
+| Raw-access writes to the tables | `test/test.py`, directed test `raw_access_write` (RTL and gate level) |
