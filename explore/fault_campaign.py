@@ -486,6 +486,12 @@ def mask_checks():
                         nb += 1
                         neq += r[inst][f"s{jm}c{c}r{rr}"] != ob[inst][f"s{jb}c{c}r{rr}"]
         print(f"mask 00 in the mask runs against Part B (same seeds): {nb - neq} of {nb} mode counts identical")
+    if have("AT") and os.path.exists(os.path.join(OUT, "MAT.tsv")):
+        a = {(r["config"], r["program"]): r for r in load("AT")}
+        cols = ("mis_seq", "mis_cpu", "x_seq", "x_cpu")
+        rows = load("MAT")
+        same = sum(all(r[c] == a[(r["config"], r["program"])][c] for c in cols) for r in rows)
+        print(f"twin flips with mask {os.environ.get('BPX_MASK', '?')} against Part A on the twin (no mask), same seeds: {same} of {len(rows)} runs identical in every count")
 
 
 def mask_report():

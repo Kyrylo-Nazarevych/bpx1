@@ -1,0 +1,3 @@
+no decay, masks ['00', '03', '30', '21', '01', '0F', 'F0', '3C'] (shadow, all modes) and mask 21 driving in all 8 modes, 71 programs: every count equals the plain run, all flags 0: True []
+mask 00 in the mask runs against Part B (same seeds): 30672 of 30672 mode counts identical
+twin flips with mask F0 against Part A on the twin (no mask), same seeds: 852 of 852 runs identical in every count

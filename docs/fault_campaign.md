@@ -1,6 +1,6 @@
 # BPX-1 pre-silicon fault-injection campaign
 
-Status: done, 26 Nov 2026, branch `campaign`. The baseline that the silicon measurements are compared against:
+Status: done, 26 Nov 2026, branch `campaign`; coset-mask follow-up in section 7 (27 Nov). The baseline that the silicon measurements are compared against:
 predicted extra mispredictions per fault, per predictor and per protection mode. Every number below was run and
 read in this campaign **(VERIFIED)** unless marked otherwise. Raw results: `~/work/bpx1_fi/out/*.tsv` (WSL);
 aggregated tables and logs: `explore/fault_results/`. Runner: `explore/fault_campaign.py`; validation:
@@ -217,7 +217,8 @@ CODE 0: 5.35 [1.52, 10.45]; parity: 3.57; SEC-DED: 3.54, with RESTORE **0.024** 
   so a word that decays completely in one direction is silent under every CODE: with all-to-0 or all-to-1 decay,
   C3 is no better than no code (5.77 vs 5.62 per 1000 at τ = 1e3). Only SEC-DED with RESTORE catches the first
   flipped bit before the second. A code that detects all unidirectional errors (Berger, m-of-n) would fit this
-  memory better **(ESTIMATED: reasoning, not simulated)**.
+  memory better **(ESTIMATED: reasoning, not simulated)**. A coset mask closes the blind spot at no cost in cells:
+  section 7.
 - **When the twin stops being worth using.** Against leaving W3 out at prediction (8.67): the best mode is better
   from τ ≈ 1e3 (C3 R0, −2.1 [−3.8, −0.8]), C2 R1 from τ ≈ 3e3; CODE 0 needs τ ≥ 1e6. Against a 3-table design
   (4.02): the twin with C2 R1 is better from τ ≈ 3e4 (mixed) or 3e3 (one-directional decay). So with the estimated
@@ -251,7 +252,122 @@ CODE 0: 5.35 [1.52, 10.45]; parity: 3.57; SEC-DED: 3.54, with RESTORE **0.024** 
 - Not done: the RTL spot check by raw-write injection (docs/mosaic.md step 7 mentions it): the comparison is
   against the golden model, which equals the RTL in the project's co-simulation.
 
-## 7. Cost
+## 7. Coset mask for the twin's code (follow-up, 27 Nov 2026)
+
+**Idea.** The chip stores `codeword XOR MASK` on the floating nodes and XORs MASK back after the read (inverter
+polarities, no cells). A fully decayed word (nodes all 0 or all 1) then decodes as MASK or ~MASK, which is not a
+code word if MASK is not. In bpsim: twin scenario suffix `k<hex>` (`e1e4pmkF0`); decay acts on the node values;
+the per-cell draws and decay seeds do not depend on the mask, so every mask sees the same chip.
+
+**Algebra (VERIFIED with the model's encoder and decoder, `mask_algebra.log`).** Code words: 00 E1 D2 33 B4 55 66 87
+78 99 AA 4B CC 2D 1E FF. Two masks behave alike on a fully decayed word exactly when they lie in the same coset
+(they differ by a code word, since ~MASK = MASK ⊕ FF and FF is a code word):
+
+| Mask | Weight | Code word | Syndrome / distance | Nodes 00 → decoded (C0, C1, C2, C3) | Nodes FF → decoded |
+| --- | --- | --- | --- | --- | --- |
+| 00 | 0 | yes | 0 / 0 | w 0 everywhere (silent) | w −1 everywhere (silent) |
+| 03 | 2 | no | 3 / 2 | w 3, w 3, abstain, abstain | w −4, w −4, abstain, abstain |
+| 30 | 2 | no | 3 / 2 (same coset as 03) | w 0, w 0, abstain, abstain | w −1, w −1, abstain, abstain |
+| 21 | 2 | no | C / 2 | w 1, w 1, abstain, abstain | w −2, w −2, abstain, abstain |
+| 01 | 1 | no | E / 1 | w 1, abstain, w 0 (miscorrected), abstain | w −2, abstain, w −1 (miscorrected), abstain |
+| 0F | 4 | **no** | F / 2 | w −1, w −1, abstain, abstain | w 0, w 0, abstain, abstain |
+| F0 | 4 | no | F / 2 (same coset as 0F) | w 0, w 0, abstain, abstain | w −1, w −1, abstain, abstain |
+| 3C | 4 | no | F / 2 (same coset as 0F) | w −4, w −4, abstain, abstain | w 3, w 3, abstain, abstain |
+
+0x0F is not a code word (data F encodes to FF), so it closes the blind spot for SEC-DED and detect-all; but it
+inverts the data nodes, so CODE 0 and parity see the data decay in the opposite direction (to 0 now reads −1, to 1
+reads 0). **The masks added on the merits are 0xF0 and 0x30 (check bits only):** the data nodes are untouched, so
+CODE 0 behaves exactly as without a mask, and a fully decayed word reads as weight 0 / −1 under CODE 0 and parity
+and abstains under SEC-DED and detect-all. 0x3C is a third member of the 0x0F coset, added for contrast.
+
+**Checks (VERIFIED).** No decay: all 8 masks (shadow, all modes) and mask 0x21 driving in all 8 modes, 71 programs:
+every count equals the plain run, all flags 0. Mask 0x00 in the mask runs reproduces Part B: 30,672 of 30,672 mode
+counts identical. Against the golden model with masks 0x21, 0x0F, 0x01 on the decay cases (the model gets the
+logical bit each decay leaves): 66 of 66 comparisons equal for each mask. Random single-bit flips on the twin (Part
+A's process, all 4 rates, 3 seeds) with mask 0xF0: 852 of 852 runs identical to no mask in every count. As expected:
+without decay, decoded = (cw ⊕ m ⊕ e) ⊕ m = cw ⊕ e, whatever m.
+
+**Result** (τ = 1e4 branches, 3 seeds, 69 programs, CPU model, VERIFIED): extra mispredictions of the default per 1000
+branches (TW_SDC per 1000 branches); ▲ / ▼ = worse / better than mask 00, paired over programs and seeds, 95 %.
+Other τ values (1e3, 1e5 for all masks; 1e2 to 1e6 for 00, F0, 21) are in `explore/fault_results/masks.tsv` and
+`maskreport.md`.
+
+| decay | mask | C0 R0 | C0 R1 | C1 R0 | C1 R1 | C2 R0 | C2 R1 | C3 R0 | C3 R1 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| exp, to 0 | 00 | 3.10 (184) | 3.10 (184) | 3.37 (121) | 3.34 (121) | 2.55 (119) | 0.69 (50) | 3.35 (93) | 3.33 (93) |
+| exp, to 0 | F0 | 3.09 (185) | 3.15 (184) | 3.20 (120) ▼ | 3.28 (120) ▼ | 2.70 (25) | 1.54 (37) ▲ | 3.15 (1) ▼ | 3.22 (1) ▼ |
+| exp, to 0 | 30 | 3.14 (184) | 3.08 (184) | 3.26 (120) | 3.23 (121) ▼ | 2.70 (23) | 2.18 (37) ▲ | 3.17 (1) ▼ | 3.19 (1) ▼ |
+| exp, to 0 | 21 | 4.09 (192) ▲ | 4.25 (193) ▲ | 4.36 (130) ▲ | 4.40 (130) ▲ | 2.62 (22) | 1.41 (34) | 3.32 (1) | 3.33 (1) |
+| exp, to 0 | 03 | 9.76 (197) ▲ | 9.87 (197) ▲ | 9.90 (131) ▲ | 10.00 (131) ▲ | 2.75 (24) ▲ | 2.65 (36) ▲ | 3.36 (1) | 3.42 (1) |
+| exp, to 0 | 01 | 4.11 (191) | 4.22 (192) ▲ | 3.37 (34) | 3.46 (34) | 2.63 (109) ▲ | 1.28 (50) ▲ | 3.37 (2) | 3.40 (2) |
+| exp, to 0 | 0F | 2.80 (167) | 2.82 (167) | 3.28 (106) | 3.35 (106) | 2.67 (22) | 1.11 (26) | 3.39 (1) | 3.38 (1) |
+| exp, to 0 | 3C | 4.28 (194) | 4.21 (194) | 4.37 (130) | 4.41 (129) | 2.73 (22) | 1.01 (28) | 3.18 (1) ▼ | 3.21 (1) |
+| exp, to 1 | 00 | 2.79 (167) | 2.81 (168) | 3.23 (106) | 3.24 (107) | 2.42 (105) | 0.72 (44) | 3.27 (81) | 3.27 (81) |
+| exp, to 1 | F0 | 2.81 (167) | 2.81 (167) | 3.30 (107) | 3.29 (107) | 2.72 (22) ▲ | 1.04 (27) | 3.40 (1) | 3.37 (1) |
+| exp, to 1 | 30 | 2.85 (167) | 2.81 (167) | 3.32 (106) | 3.32 (106) | 2.76 (21) ▲ | 1.50 (28) | 3.40 (1) | 3.40 (1) |
+| exp, to 1 | 21 | 3.03 (184) | 3.00 (184) | 3.45 (121) | 3.38 (120) | 2.56 (21) ▲ | 1.17 (26) ▲ | 3.31 (1) | 3.33 (1) |
+| exp, to 1 | 03 | 4.26 (193) | 4.19 (193) | 4.37 (126) | 4.27 (127) | 2.80 (22) ▲ | 1.17 (27) | 3.19 (1) | 3.20 (1) |
+| exp, to 1 | 01 | 3.08 (184) | 3.02 (185) | 3.30 (32) | 3.24 (32) | 2.55 (96) ▲ | 1.56 (43) | 3.24 (2) | 3.23 (2) |
+| exp, to 1 | 0F | 3.12 (185) ▲ | 3.14 (185) | 3.22 (120) | 3.23 (121) | 2.72 (24) ▲ | 2.17 (36) ▲ | 3.17 (1) | 3.17 (1) |
+| exp, to 1 | 3C | 9.76 (197) ▲ | 9.83 (196) ▲ | 9.95 (132) ▲ | 9.92 (131) ▲ | 2.77 (24) ▲ | 3.26 (35) ▲ | 3.42 (1) | 3.42 (1) |
+| exp, mixed | 00 | 7.32 (195) | 7.27 (194) | 5.05 (83) | 5.04 (83) | 4.98 (78) | 2.67 (41) | 3.54 (8) | 3.50 (8) |
+| exp, mixed | F0 | 7.38 (194) | 7.27 (194) | 5.11 (83) | 5.06 (83) | 5.25 (74) | 2.14 (38) | 3.34 (7) | 3.36 (7) |
+| exp, mixed | 30 | 7.26 (194) | 7.36 (194) | 5.11 (83) | 5.08 (83) | 5.06 (78) | 2.12 (40) | 3.59 (9) | 3.54 (9) |
+| exp, mixed | 21 | 6.84 (194) | 6.90 (193) | 4.80 (80) | 4.83 (80) | 5.05 (79) | 1.84 (39) | 3.30 (8) | 3.31 (9) |
+| exp, mixed | 03 | 7.50 (194) | 7.55 (195) | 5.31 (83) | 5.29 (83) | 5.46 (78) | 2.11 (40) | 3.37 (9) | 3.40 (9) |
+| exp, mixed | 01 | 6.91 (194) | 6.92 (193) | 5.61 (84) | 5.67 (84) | 4.09 (71) | 1.72 (39) | 3.54 (5) | 3.53 (5) |
+| exp, mixed | 0F | 9.33 (195) | 9.41 (195) | 5.64 (82) | 5.71 (82) | 6.76 (77) | 2.82 (39) | 3.49 (7) | 3.53 (7) |
+| exp, mixed | 3C | 8.73 (195) | 8.73 (195) | 5.54 (82) | 5.55 (82) | 6.15 (75) | 2.28 (40) | 3.61 (6) | 3.61 (6) |
+| log-n, to 0 | 00 | 2.25 (122) | 0.02 (10) | 2.32 (103) | 0.01 (7) | 2.20 (105) | 0.00 (7) | 2.33 (94) | 0.00 (6) |
+| log-n, to 0 | F0 | 2.25 (122) | 0.02 (10) | 2.28 (103) | 0.01 (7) | 2.28 (11) | 0.01 (1) | 2.27 (0) ▼ | 0.00 (0) |
+| log-n, to 0 | 21 | 3.27 (130) ▲ | 0.03 (11) | 3.33 (112) ▲ | 0.01 (8) | 2.22 (10) | 0.00 (1) | 2.30 (1) | 0.00 (0) |
+| log-n, to 1 | 00 | 2.19 (106) | 0.00 (9) | 2.26 (89) | 0.00 (6) | 2.13 (93) | 0.00 (6) | 2.27 (82) | 0.00 (5) |
+| log-n, to 1 | F0 | 2.19 (106) | 0.00 (9) | 2.25 (91) | 0.01 (6) | 2.28 (11) ▲ | 0.00 (1) | 2.32 (1) | 0.00 (0) |
+| log-n, to 1 | 21 | 2.37 (121) | 0.03 (9) | 2.45 (103) | 0.02 (6) | 2.25 (10) ▲ | 0.01 (1) | 2.34 (1) | 0.00 (0) |
+| log-n, mixed | 00 | 6.80 (127) | 0.05 (11) | 5.43 (68) | 0.04 (5) | 4.50 (57) | 0.01 (5) | 2.62 (4) | 0.00 (0) |
+| log-n, mixed | F0 | 6.80 (127) | 0.05 (11) | 5.40 (68) | 0.04 (6) | 4.54 (57) | 0.00 (4) | 2.45 (4) | 0.00 (0) |
+| log-n, mixed | 21 | 6.45 (129) | 0.04 (11) | 4.82 (69) ▼ | 0.04 (6) | 4.43 (62) | 0.01 (5) | 2.28 (9) | 0.00 (1) |
+
+**What it shows.**
+- **The blind spot is real in the flags and small in mispredictions.** With one-directional decay, any non-code-word
+  mask cuts TW_SDC under detect all by about 100× (decay to 0, τ = 1e4: 93 → 1 per 1000 branches), under SEC-DED
+  without restore by about 5× (119 → 25), with restore by 1.3× to 2.6×: the decayed words now abstain instead of
+  passing silently. Mispredictions move by only ±0.3 per 1000 there,
+  because without a mask the decay lands on weights 0 and −1, which cost almost as little as abstaining.
+- **Masks with data bits (0x03, 0x21, 0x3C, 0x01, 0x0F) hurt CODE 0 and parity** whenever the decayed data reads as a
+  large weight (0x03 to 0 and 0x3C to 1 read ±3 / −4: +6.5 to +7.0 per 1000), and help only when they happen to
+  read −1 instead of 0 (0x0F to 0).
+- **Masks cost SEC-DED with restore under one-directional decay** (C2 R1: 0x00 0.69 → 0xF0 1.54 to 0, 1.04 to 1 at
+  τ = 1e4; up to +1.9 per 1000 at τ = 1e2). Without a mask the commonest stored words (00 and FF: weights 0 and −1)
+  sit at or one level away from the preferred state, so they barely decay; a mask exposes their nodes **(ESTIMATED:
+  explanation, consistent with the per-mask numbers, not separately measured)**.
+- Per-cell fixed lifetimes: with RESTORE everything is ≤ 0.05 per 1000 from τ = 1e4 with or without a mask.
+
+**Recommendation: MASK = 0xF0 (invert the four check bits, leave the data bits).** Reason: it is the mask that does
+no harm where the twin is used without a code (CODE 0 is unchanged: identical aggregates in all 30 log-normal
+cells; with exponential lifetimes −0.3 to +0.6 per 1000, never significant, because the order of the random
+lifetime draws changes), and it makes the flags tell the truth under
+one-directional decay. With it, a fully decayed word reads weight 0 or −1 under CODE 0 and parity, exactly as today,
+and abstains under SEC-DED and detect-all.
+- **Better than no mask:** detect all (CODE 3) with decay to 0 (−0.1 to −0.3 per 1000, significant at τ = 1e3 and
+  1e4) and with mixed levels at τ = 1e3 (−0.9); and TW_SDC under CODE 2 and 3 for one-directional decay at every τ
+  (e.g. 93 → 1 per 1000), which is what the silicon experiment counts.
+- **Worse than no mask:** SEC-DED with one-directional decay, above all with RESTORE (C2 R1 +0.3 to +1.9 per 1000 for
+  τ = 1e2 to 1e4; equal from 1e5), and detect all with decay to 1 (+0.1 to +0.9, significant only at τ = 1e3 with
+  RESTORE, +0.38).
+- Neutral: CODE 0 always; parity −0.16 to +0.6 (significant only as small gains with decay to 0); random
+  single-bit flips (identical counts); per-cell fixed lifetimes with RESTORE.
+
+If the decay turns out to be one-directional and the chip is to run in its best mode (SEC-DED + restore) for the
+lowest misprediction rate rather than for truthful flags, MASK = 0x00 is better. Measuring the preferred level per
+cell on silicon (section 5) decides between them. Not done: the mask in the RTL and the model (a hardware change,
+outside this campaign's files); masks other than the eight listed.
+
+Cost of this follow-up: 11,756 s CPU (mask runs 6,444, log-normal and extra τ 4,334, no-decay check 439, twin flips
+539) plus about 300 s of model validation; 51 minutes of bpsim wall time at 4 threads, niced **(VERIFIED,
+`cpu_time.log`)**.
+
+## 8. Cost
 
 CPU time of the runs: 13,934 s (3.9 CPU-hours: Part A 4,774 + 1,892 + 1,318, twin flips 652, Part B 3,713, plain
 and checks 1,214, pilot and rerun 372) plus about 600 s of validation and aggregation; 61 minutes of bpsim wall
