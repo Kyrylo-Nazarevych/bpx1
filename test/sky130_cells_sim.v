@@ -1,4 +1,4 @@
-// Behavioural models of the few SKY130 cells that src/ instantiates by name (bpx_ltab.v).
+// Behavioural models of the few SKY130 cells that src/ instantiates by name (bpx_ltab.v, bpx_ro.v).
 // Used only for RTL simulation without the PDK (the cocotb RTL test, Verilator).  The gate-level test and the
 // chip flow use the PDK's own models and never read this file.
 `default_nettype none
@@ -77,6 +77,34 @@ module sky130_fd_sc_hd__a222oi_1 (
 );
   assign Y = ~((A1 & A2) | (B1 & B2) | (C1 & C2));
 endmodule
+
+module sky130_fd_sc_hd__xor2_1 (
+    input  wire A,
+    input  wire B,
+    output wire X
+);
+  assign X = A ^ B;
+endmodule
+
+module sky130_fd_sc_hd__inv_1 (
+    input  wire A,
+    output wire Y
+);
+  assign Y = ~A;
+endmodule
+
+// The ring oscillators' delay stage (src/bpx_ro.v): an inertial delay of 4 ns that stands for a whole ring (the
+// other cell models have none), so that a running ring is never a zero-delay loop.  Ring A has one such stage
+// (simulated at 125 MHz), ring B two (62.5 MHz).  Use xnor2_1 by name nowhere else, or it inherits this delay.
+/* verilator lint_off ASSIGNDLY */
+module sky130_fd_sc_hd__xnor2_1 (
+    input  wire A,
+    input  wire B,
+    output wire Y
+);
+  assign #4 Y = ~(A ^ B);
+endmodule
+/* verilator lint_on ASSIGNDLY */
 
 // Tri-state inverter used as a dynamic storage node (bpx_ltab, DYN = 1): this model holds the last driven value
 // for ever (an ideal capacitor).  Real silicon leaks; the PDK's gate-level model shows the floating node as unknown.

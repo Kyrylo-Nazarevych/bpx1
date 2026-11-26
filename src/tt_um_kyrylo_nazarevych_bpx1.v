@@ -1,8 +1,8 @@
-// Probe (branch probe-leaky): one dynamic-storage table of the BPX-1 mosaic (docs/mosaic.md) alone on the tile, to
-// see what the flow, the precheck and the gate-level simulation make of floating storage nodes.
-//   ui_in[3:0] address   ui_in[7:4] data nibble (stored as {~nibble, nibble})
-//   uio_in[0] write (rising edge)   uio_in[1] read enable (0: outputs forced to 0)   uio_in[2] clear (rising edge)
-//   uo_out[7:0] the addressed entry (while read enable is 1)
+// Probe (branch probe-ro): the two ring oscillators of the BPX-1 mosaic (docs/mosaic.md 7.7, src/bpx_ro.v) alone on
+// the tile, to see what the flow, the precheck and the gate-level simulation make of combinational loops of named
+// standard cells.
+//   ui_in[0] run A   ui_in[1] run B   ui_in[2] sel (0: A, 1: B)      (synchronised by two flops)
+//   uo_out[0] div (selected ring / 256)   uo_out[1] rnd (entropy bit)   uo_out[7:2] 0
 `default_nettype none
 
 module tt_um_kyrylo_nazarevych_bpx1 (
@@ -18,36 +18,16 @@ module tt_um_kyrylo_nazarevych_bpx1 (
   assign uio_out = 8'h00;
   assign uio_oe  = 8'h00;
 
-  reg       rst_m, rst;
-  reg [7:0] in_m, in_s;
-  reg [2:0] c_m, c_s, c_q;
-  reg [7:0] out_q;
-  reg       en_q;
-  wire      wcap, wact, wpulse, busy;
-  wire [7:0] rdata;
-  wire      wr  = c_s[0] & ~c_q[0];
-  wire      clr = c_s[2] & ~c_q[2];
-
+  reg [2:0] in_m, in_s;
   always @(posedge clk) begin
-    rst_m <= ~rst_n;
-    rst   <= rst_m;
-    in_m  <= ui_in;
-    in_s  <= in_m;
-    c_m   <= uio_in[2:0];
-    c_s   <= c_m;
-    c_q   <= c_s;
-    en_q  <= c_s[1] & ~busy;                  // never show a read taken during a write
-    out_q <= rdata;
+    in_m <= ui_in[2:0];
+    in_s <= in_m;
   end
 
-  bpx_wseq u_wseq (.clk(clk), .rst(rst), .req(wr | clr), .wcap(wcap), .wact(wact), .wpulse(wpulse), .busy(busy));
+  wire div, rnd;
+  bpx_ro u_ro (.clk(clk), .run_a(in_s[0]), .run_b(in_s[1]), .sel(in_s[2]), .div(div), .rnd(rnd));
 
-  bpx_ltab #(.AW(4), .RW(2), .EW0(8), .EW1(0), .INIT(8'h00), .DYN(1)) u_dyn (
-      .clk(clk), .wcap(wcap), .wact(wact), .wpulse(wpulse), .clr(clr),
-      .we0(wr), .we1(1'b0), .waddr(in_s[3:0]), .wdata({~in_s[7:4], in_s[7:4]}),
-      .raddr(in_s[3:0]), .rdata(rdata));
+  assign uo_out = {6'b0, rnd, div};
 
-  assign uo_out = out_q & {8{en_q}};
-
-  wire _unused = &{1'b0, ena, uio_in[7:3]};
+  wire _unused = &{1'b0, ena, rst_n, ui_in[7:3], uio_in};
 endmodule
