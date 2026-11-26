@@ -23,7 +23,7 @@ module bpx_pred #(
     parameter W   = 10,            // identifier bits
     parameter LGB = 6,             // log2 bimodal / chooser entries
     parameter LGG = 7,             // log2 gshare entries
-    parameter HG  = 6,             // gshare history bits (HG <= LGG)
+    parameter HG  = 4,             // gshare history bits (HG <= LGG)
     parameter NT  = 3,             // tagged tables (2..4)
     parameter LGT = 4,             // log2 entries of each tagged table
     parameter TB  = 7,             // tag bits

@@ -1,8 +1,7 @@
 # BPX-1 design specification (DR-01)
 
-Status: **draft for gate G0**. Sections 1–6 and 9 are decided and may still be tuned until the protocol freezes at
-G1. Section 7 (the predictor algorithm and its sizes) and the numbers of section 8 (budget) are filled from the
-exploration (docs/exploration.md). Evidence labels as in the requirements specification, section 10.
+Status: **gate G1: protocol and predictor frozen.** The RTL (`src/bpx_*.v`) and the golden model (`model/bpx1.py`)
+implement this document; physical closure (section 8) is in progress. Evidence labels as in the requirements specification, section 10.
 
 ## 1. What the chip is
 
@@ -140,12 +139,31 @@ state, sets a sticky flag and increments the saturating error counter:
 
 ## 4. Control port (FR-07…FR-10, IR-02, IR-03)
 
-SPI mode 0, MSB first, `CSn` frames a transaction. First byte: bit 7 = 1 write / 0 read, bits 6:0 = address;
-then data bytes, the address incrementing after each. `SCK` is sampled by `clk` (it is not a clock on the chip):
-`f_SCK ≤ f_clk / 8`. The port works at any `clk`, including single steps. The register map is fixed at G1
-(control, drive select, freeze, debug select, commands, status, error flags, statistics snapshot, histories, queue,
-table address/data); all table access goes through the tables' one read port and one write sequencer in cycles the
-predict port does not use, so it never stalls a request (IR-02).
+SPI mode 0, MSB first, `CSn` frames a transaction. First byte: bit 7 = 1 write / 0 read, bits 5:0 = address;
+then 16-bit words, the address incrementing after each. `SCK` is sampled by `clk` (it is not a clock on the chip):
+each `SCK` phase must last at least four `clk` periods (`f_SCK ≤ f_clk / 8`). The port works at any `clk`, including
+single steps. Raw table reads use cycles the predict port leaves free and never delay a request; a raw table
+*write* may delay a coinciding request by up to two clocks (IR-02).
+
+| Addr | Name | Access | Content |
+| --- | --- | --- | --- |
+| 0x00 | ID | R | `0xB101` |
+| 0x01 | CTRL | RW | `[2:0]` driving predictor: 0 default, 1 bimodal, 2 gshare, 3 tournament, 4–7 static not-taken; `[3]` freeze learning; `[7:4]` DBG0 event; `[11:8]` DBG1 event |
+| 0x02 | CMD | W | bit 0 soft reset; bit 1 clear predictors (tables, histories, in-flight work); bit 2 clear statistics and error flags; bit 3 snapshot the statistics; bit 4 snapshot and clear the counters in one step (no event lost or counted twice) |
+| 0x03 | STATUS | R | `[2:0]` in-flight count; `[3]` ready; `[4]` staging valid; `[5]` request pending; `[6]` table write in progress; `[7]` raw access pending; `[8]` resolve refused (queue empty); `[9]` predict refused (queue full); `[10]` request withdrawn; `[11]` statistics overflow (flags are sticky) |
+| 0x04 | ERRCNT | R | `[7:0]` refused or withdrawn requests, saturating |
+| 0x05–0x0E | STATS | R | Snapshot taken by CMD bit 3, two words (low, high) per counter: resolved branches, then mispredictions of default, bimodal, gshare, tournament. Counters are 16 bits and saturate (never wrap; overflow is flagged in STATUS). For exact totals of longer runs use snapshot-and-clear at least every 65,535 branches and add the snapshots up (FR-08). |
+| 0x0F | RAW_ADDR | RW | `[6:0]` entry; `[10:8]` space: 0 bimodal+chooser, 1 gshare, 2… tagged tables, 7 small registers; `[13:12]` field write enables; `[15]` address + 1 after each RAW_DATA read |
+| 0x10 | RAW_DATA | RW | Read: the addressed entry (fetched after RAW_ADDR is written and after each read). Write: the entry fields enabled in RAW_ADDR. |
+
+Raw entries: space 0 `{chooser[1:0], bimodal[1:0]}`; space 1 `gshare[1:0]`; tagged `{u[1:0], tag, ctr[2:0]}`.
+Space 7: 0–1 committed history, 2–3 speculative history (12 bits each), 4 `{LFSR[7:0], use-alternate[3:0]}`
+(writable), 5–7 staging register, 8 queue pointers, 9–15 queue entries. Every bit of predictor state and
+configuration is readable while requests run (FR-10); tables and the two small predictor registers are writable.
+
+DBG events (CTRL): 1 request seen, 2 predict done, 3 resolve done, 4 misprediction repair, 5 flush, 6 refusal or
+withdrawal, 7 write-pulse cycle, 8 staging valid, 9 queue empty, 10–13 last predictions (default, bimodal, gshare,
+tournament), 14 control-port word, 15 staging read.
 
 ## 5. Reset, ready, `ena`
 
@@ -216,24 +234,68 @@ empty, each predictor's raw prediction, control-port byte strobe, …; list fixe
 `PRED`, `FULL` and `READY` already on pins, any operation or error can be reconstructed from two selectable events,
 and the remaining output is needed for `MISO`.
 
-## 7. Predictor algorithm
+## 7. Predictor algorithm (frozen at G1; evidence in docs/exploration.md)
 
-*To be fixed at G1 from docs/exploration.md.* Decided so far: training never uses anything remembered from predict
-time (section 3.2); the reference predictors train by their classic rules on every branch (FR-07); identifier width
-10 bits unless the exploration shows a static hint bit is worth more than the tenth identifier bit.
+Total predictor storage: **1,088 bits** in five latch tables. `fold(v, n)` is the XOR of the consecutive n-bit
+slices of v; `h[L-1:0]` are the L most recent outcomes of the history in use (bit 0 = most recent).
 
-## 8. Budget (EX-04)
+| Table | Entries × bits | Index | Content, initial value |
+| --- | --- | --- | --- |
+| BC | 64 × (2 + 2) | `fold(ID, 6)` | bimodal counter (01) and chooser counter (01), separately writable |
+| G | 128 × 2 | `fold(ID, 7) ^ (h[3:0] << 3)` | gshare counter (01) |
+| T1, T2, T3 | 16 × (3 + 7 + 2) each, history lengths L = 4, 9, 20 | `fold(ID, 4) ^ fold(h[L-1:0], 4)` | `{u, tag, ctr}` = `{0, 0, 3}`; tag = `fold(ID >> 4, 7) ^ fold(h[L-1:0], 7) ^ (fold(h[L-1:0], 6) << 1)` |
 
-*Numbers to be filled at G1.* Framework **(VERIFIED unless marked)**:
+Small registers: use-alternate counter (4 bits, starts at 8), allocation LFSR (8 bits, taps 0xB8, starts at 0xE1),
+committed and speculative history (20 bits each).
 
-| Item | Value | Source |
+**Reference predictors (FR-07).** bimodal = BC counter MSB. gshare = G counter MSB. tournament = gshare if the
+chooser MSB is 1, else bimodal. They train on every resolved branch by the classic rules: both counters move toward
+the outcome; the chooser moves toward the component that was right when the two disagree.
+
+**Default predictor.** A table *hits* when its stored tag equals the computed tag. The longest-history hit is the
+*provider*, the next one the *alternate*; without a second hit the alternate is the tournament, and without any hit
+the prediction is the tournament. The provider is *weak* when its counter is 3 or 4 and its `u` is 0. Prediction =
+alternate if the provider is weak and the use-alternate counter is 8 or more, else the provider's counter MSB.
+**Confidence** (FR-11) = high when the provider's counter is saturated (0 or 7) and was used, or, without a
+provider, when the counter the tournament used is saturated.
+
+**Training** at resolve, from the committed lookup of that branch and the outcome only:
+
+1. Provider: counter toward the outcome. If provider and alternate predictions differ: `u` up if the provider was
+   right, down if wrong; and, if the provider was weak, the use-alternate counter up if the alternate was right,
+   down if wrong. If the provider was weak and the alternate is a tagged table, its counter also moves.
+2. If the default prediction (as recomputed at resolve) was wrong and a longer table exists: among the longer
+   tables whose entry has `u` = 0, one is chosen (the LFSR steps; candidate k in increasing order is taken where k is
+   the number of leading ones of the LFSR, capped at the last) and overwritten with the computed tag, counter 4 or 3
+   by outcome, `u` = 0. If none is free, the `u` of each longer table's entry is decremented.
+3. The reference tables train as above.
+
+**Sizes of the references, and why.** Bimodal + chooser 256 bits, gshare 256 bits: the reference tournament has 512
+bits, the default predictor adds 576. Each reference is somewhat below its own saturation (a 128-entry bimodal alone
+would score 1.0 point more, a 4096-entry one 1.9 more); making them larger does not help the default predictor
+(the best candidates with a 128-entry bimodal score the same) and costs area the tagged tables use better. The
+gshare history of 4 bits is the best history for a 128-entry tournament on the benchmark set. Nothing was shrunk to
+widen the gap: with these very tables the default predictor is 2.3 points more accurate than the tournament.
+
+**Identifier width (IR-05).** 10 bits: accuracy is flat from 6 to 16 bits (91.16, 91.29, 91.24, 91.28, 91.27 % at
+6, 8, 10, 12, 16). No static hint bit: agree-coded variants gain or lose under 0.05 point.
+
+## 8. Budget (EX-04), re-baselined at G1
+
+| Block | Synthesised area, µm² | Basis |
 | --- | --- | --- |
-| Core area | 72,565 µm² | local build metrics |
-| Tap cells | 1,297 µm² | probe |
-| Table, synthesised | `550 + entries × (20.5 × bits + 6.5)` µm² | Yosys fit, error < 3 % |
-| Growth from synthesis to routed (buffers for fan-out and timing, clock tree) | about 18–20 % in the probe | LibreLane probe p4 (in progress) |
-| Synthesised logic | drive-strength-2 cells: flop 21.3, XOR 16.3, NAND2 6.3, mux2 11.3 µm² | PDK liberty, flow exclusion list |
-| Target utilisation | to be set from the probe's routing result | (DON'T KNOW until the probe finishes) |
+| Tables: BC 5,400; G 5,400; T1–T3 3 × 4,080 | 23,000 | **(VERIFIED)** Yosys, flow's cell exclusions |
+| Sequencer, queue, histories, statistics, raw access (`bpx_core`) | 16,000 (13,000 with drive-strength-1 gates allowed) | **(VERIFIED)** Yosys |
+| Predictor logic: hashes, compare, training (`bpx_pred`, folds) | 9,000 (7,500) | **(VERIFIED)** Yosys |
+| Statistics snapshot latches | 1,300 | **(VERIFIED)** Yosys |
+| Control port, synchronisers | 2,800 (2,400) | **(VERIFIED)** Yosys |
+| **Total** | **57,000 (49,900)** | |
+| Routable, demonstrated | 48,900 synthesised → 82–84 % utilisation, DRC/LVS/antenna clean | **(VERIFIED)** probes p5 and the repository probe, local and CI |
+
+The design fits only with drive-strength-1 gates allowed in synthesis (AL-02: `SYNTH_EXCLUDED_CELL_FILE`), which is
+being proven in a trial build; the fallback, if that fails, is to cut logic (statistics width, raw-access paths) or
+one tagged table. Critical path budget: one clock for hash + table read + compare + select, about 12–13 ns at the
+slow corner by the probe's cell delays **(ESTIMATED)**, so 50 MHz is the target and 66 MHz is not promised.
 
 ## 9. The U1 CPU: the contract the FPGA team builds (FR-03, VR-06)
 

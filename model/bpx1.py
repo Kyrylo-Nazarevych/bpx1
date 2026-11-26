@@ -37,7 +37,7 @@ class Config:
     W: int = 10                       # identifier bits
     NB: int = 64                      # bimodal entries (2-bit), also the chooser's size
     NG: int = 128                     # gshare entries (2-bit)
-    HG: int = 6                       # gshare history bits
+    HG: int = 4                       # gshare history bits
     # tagged tables of the default predictor: (entries, tag bits, history length), shortest history first
     tagged: List[Tuple[int, int, int]] = field(default_factory=lambda: [(16, 7, 4), (16, 7, 9), (16, 7, 20)])
     CB: int = 3                       # tagged counter bits
@@ -46,7 +46,7 @@ class Config:
     base_tournament: bool = True      # default predictor's base: True = the tournament, False = bimodal
     alloc_lfsr: bool = True           # allocation choice: True = 8-bit LFSR among the free tables, False = shortest
     DEPTH: int = 4                    # in-flight capacity
-    STATW: int = 20                   # statistics counter width
+    STATW: int = 16                   # statistics counter width
     ERRW: int = 8                     # error counter width
 
     @property

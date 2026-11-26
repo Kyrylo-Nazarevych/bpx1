@@ -16,14 +16,14 @@ module bpx_chip #(
     parameter W   = 10,
     parameter LGB = 6,
     parameter LGG = 7,
-    parameter HG  = 6,
+    parameter HG  = 4,
     parameter NT  = 3,
     parameter LGT = 4,
     parameter TB  = 7,
     parameter [NT*6-1:0] LV = {6'd20, 6'd9, 6'd4},
     parameter HL  = 20,
     parameter ALLOC_LFSR = 1,
-    parameter STATW = 20
+    parameter STATW = 16
 ) (
     input  wire [7:0] ui_in,
     output wire [7:0] uo_out,

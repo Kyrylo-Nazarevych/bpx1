@@ -21,14 +21,14 @@ module bpx_core #(
     parameter W   = 10,
     parameter LGB = 6,
     parameter LGG = 7,
-    parameter HG  = 6,
+    parameter HG  = 4,
     parameter NT  = 3,
     parameter LGT = 4,
     parameter TB  = 7,
     parameter [NT*6-1:0] LV = {6'd20, 6'd9, 6'd4},
     parameter HL  = 20,
     parameter ALLOC_LFSR = 1,
-    parameter STATW = 20           // statistics counter width (17..32)
+    parameter STATW = 16           // statistics counter width (16..32)
 ) (
     input  wire         clk,
     input  wire         rst,       // synchronous, already synchronised
@@ -59,7 +59,7 @@ module bpx_core #(
   reg  [3:0] dsel0, dsel1;
   reg        srst;                  // soft reset, one cycle
   wire       irst = rst | srst;
-  reg        init_pend, clrp_pend, snap_pend, snap_q;
+  reg        init_pend, clrp_pend, snap_pend, snap_q, sclr_pend, sclr_q;
 
   // ---------------------------------------------------------------- state
   reg  [QW-1:0] qmem[0:3];
@@ -240,6 +240,8 @@ module bpx_core #(
       clrp_pend <= 1'b0;
       snap_pend <= 1'b0;
       snap_q    <= 1'b0;
+      sclr_pend <= 1'b0;
+      sclr_q    <= 1'b0;
       qhead     <= 2'd0;
       qcnt      <= 3'd0;
       ch        <= {HL{1'b0}};
@@ -274,7 +276,10 @@ module bpx_core #(
       dbg       <= 2'b00;
     end else begin
       // -------- initialisation and clears
-      if (wcap) snap_q <= snap_exec;
+      if (wcap) begin
+        snap_q <= snap_exec;
+        sclr_q <= snap_exec & sclr_pend;
+      end
       if (clr_exec) begin
         init_pend <= 1'b0;
         clrp_pend <= 1'b0;
@@ -352,17 +357,20 @@ module bpx_core #(
         dwr_pend <= 1'b0;
         drd_pend <= 1'b1;                           // read back what is there afterwards
         stg_v    <= 1'b0;
-        if (!d_tab) begin
-          case (da[3:0])
-            4'd0: ch <= (ch & ~{{(HL-12){1'b0}}, 12'hfff}) | {{(HL-12){1'b0}}, dwd};
-            4'd1: ch <= (ch & {{(HL-12){1'b0}}, 12'hfff}) | ({{(HL-12){1'b0}}, dwd} << 12);
-            4'd2: sh <= (sh & ~{{(HL-12){1'b0}}, 12'hfff}) | {{(HL-12){1'b0}}, dwd};
-            4'd3: sh <= (sh & {{(HL-12){1'b0}}, 12'hfff}) | ({{(HL-12){1'b0}}, dwd} << 12);
-            default: ;
-          endcase
-        end
       end
-      if (snap_exec) snap_pend <= 1'b0;
+      if (snap_exec) begin
+        snap_pend <= 1'b0;
+        sclr_pend <= 1'b0;
+      end
+      // snapshot-and-clear: the counters restart in the cycle the snapshot latches close; no resolve can run in
+      // a write-pulse cycle, so no event is lost or counted twice
+      if (wact & snap_q & sclr_q) begin
+        n_res <= {STATW{1'b0}};
+        mis0  <= {STATW{1'b0}};
+        mis1  <= {STATW{1'b0}};
+        mis2  <= {STATW{1'b0}};
+        mis3  <= {STATW{1'b0}};
+      end
 
       // -------- clear predictors (also the tail of reset): in-flight work and histories go
       if (clr_exec) begin
@@ -394,7 +402,8 @@ module bpx_core #(
           err_cnt <= 8'd0;
           eflags  <= 4'd0;
         end
-        if (reg_wdata[3]) snap_pend <= 1'b1;
+        if (reg_wdata[3] | reg_wdata[4]) snap_pend <= 1'b1;
+        if (reg_wdata[4]) sclr_pend <= 1'b1;
       end
       if (w_da) begin
         da       <= reg_wdata[6:0];

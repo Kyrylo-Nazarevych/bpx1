@@ -84,11 +84,11 @@ def sens():
         return {x["config"]: x for x in sweep.aggregate(p)} if os.path.exists(p) else None
     base = load("sens_W10")
     names = list(base)
-    ws = [w for w in (6, 7, 8, 9, 10, 11, 12, 14, 16) if load(f"sens_W{w}")]
+    ws = [w for w in (6, 8, 10, 12, 16) if load(f"sens_W{w}")]
     print("Identifier width W (accuracy %, U1 contract):\n")
     md([[n] + [f"{load(f'sens_W{w}')[n]['acc_cpu']:.3f}" for w in ws] for n in names], ["candidate"] + [f"W={w}" for w in ws])
     var = [("contract (BTB 256, EX)", "sens_W10"), ("no BTB", "sens_btb0"), ("BTB 64", "sens_btb64"), ("BTB 1024", "sens_btb1024"), ("resolve +1 stage", "sens_R2"),
-           ("resolve +2 stages", "sens_R3"), ("resolve before predict", "sens_rf1"), ("hint bit = 0", "sens_nohint")]
+           ("resolve +2 stages", "sens_R3"), ("resolve before predict", "sens_rf1")]
     print("Speedup over static not-taken under pipeline variants:\n")
     md([[n] + [f"{load(t)[n]['speedup']:.4f}" if load(t) else "" for _, t in var] for n in names], ["candidate"] + [v for v, _ in var])
     print("Accuracy % under the same variants:\n")
@@ -152,6 +152,58 @@ def charts():
     print("wrote docs/img/pareto_families.png, docs/img/pareto_chips.png")
 
 
+def pick(budget=33000, top=14):
+    """Design choice: every whole-chip candidate of the refinement, grid and random stages whose estimated area
+    fits the budget, ranked by speedup on the TUNING programs only; the held-out programs are shown beside it."""
+    budget = float(budget)
+    pool = {}
+    for tag in ("chips", "chips2", "rand"):
+        if not os.path.exists(os.path.join(OUT, tag + ".tsv")):
+            continue
+        tune = {x["config"]: x for x in sweep.load_chips(tag, "tune")}
+        hold = {x["config"]: x for x in sweep.load_chips(tag, "hold")}
+        for n, x in tune.items():
+            pool[n] = (tag, x, hold[n])
+    fit = [v for v in pool.values() if v[1]["carea"] <= budget]
+    fit.sort(key=lambda v: -v[1]["speedup"])
+    nt, nh = len(fit[0][1]["per"]), len(fit[0][2]["per"])
+    print(f"{len(pool)} whole-chip candidates, {len(fit)} within {budget:.0f} um2; tuning set {nt} programs, held-out set {nh} programs\n")
+    rows = []
+    for tag, x, h in fit[:int(top)]:
+        rows.append([x["config"], tag, f"{x['cbits']:.0f}", f"{x['carea']:.0f}", f"{x['speedup']:.4f}", f"{x['acc_cpu']:.3f}", f"{h['speedup']:.4f}", f"{h['acc_cpu']:.3f}"])
+    md(rows, ["candidate", "stage", "bits", "area", "speedup (tuning)", "accuracy % (tuning)", "speedup (held-out)", "accuracy % (held-out)"])
+    for tag in ("chips2", "chips", "rand"):
+        b = [v for v in fit if v[0] == tag]
+        if b:
+            print(f"best of stage {tag}: {b[0][1]['config']}  speedup {b[0][1]['speedup']:.4f} (tuning), {b[0][2]['speedup']:.4f} (held-out); {len(b)} candidates within budget")
+    r = [v for v in pool.values() if v[0] == "rand"]
+    if r:
+        r.sort(key=lambda v: -v[1]["speedup"])
+        print(f"best random candidate at any size: {r[0][1]['config']} bits {r[0][1]['cbits']:.0f} area {r[0][1]['carea']:.0f} speedup {r[0][1]['speedup']:.4f}")
+    # rank agreement between the two sets among the fitting candidates (Spearman)
+    a = sorted(fit, key=lambda v: -v[1]["speedup"]); ra = {id(v): i for i, v in enumerate(a)}
+    b = sorted(fit, key=lambda v: -v[2]["speedup"]); rb = {id(v): i for i, v in enumerate(b)}
+    n = len(fit)
+    rho = 1 - 6 * sum((ra[id(v)] - rb[id(v)]) ** 2 for v in fit) / (n * (n * n - 1))
+    print(f"rank correlation of speedup between tuning and held-out programs over the {n} fitting candidates: {rho:.3f}")
+
+
+def one(name, tag="chips2"):
+    """Per-program results of one whole-chip candidate against the reference predictors of the sensitivity run."""
+    x = next(a for a in sweep.aggregate(os.path.join(OUT, tag + ".tsv"), "all") if a["config"] == name)
+    s = {a["config"]: a for a in sweep.aggregate(os.path.join(OUT, "sens_W10.tsv"), "all")}
+    refs = [k for k in ("bim64", "gsh128h6", "trn64_128h6_64") if k in s]
+    tune, hold = sweep.split(set(x["per"]))
+    rows = []
+    for p in sorted(x["per"]):
+        best = max(refs, key=lambda k: s[k]["per"][p][0])
+        rows.append([p, "held-out" if p in hold else "tuning", f"{x['per'][p][0]:.2f}", f"{x['per'][p][1]:.4f}"] + [f"{s[k]['per'][p][0]:.2f}" for k in refs] +
+                    [f"{x['per'][p][0] - s[best]['per'][p][0]:+.2f}"])
+    md(rows, ["program", "set", "default acc %", "default speedup"] + [k + " acc %" for k in refs] + ["default - best reference"])
+    worse = [r for r in rows if float(r[-1]) < 0]
+    print(f"programs where the default is less accurate than the best reference: {len(worse)} of {len(rows)}: " + ", ".join(f"{r[0]} ({r[-1]})" for r in worse))
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "refs":
@@ -164,6 +216,10 @@ if __name__ == "__main__":
         sens()
     elif cmd == "programs":
         programs(*sys.argv[2:])
+    elif cmd == "pick":
+        pick(*sys.argv[2:])
+    elif cmd == "one":
+        one(*sys.argv[2:])
     elif cmd == "charts":
         charts()
     else:
