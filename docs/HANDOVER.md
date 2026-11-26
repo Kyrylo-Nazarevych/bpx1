@@ -4,6 +4,10 @@ Everything a fresh session needs to continue: state, decisions, next steps, comm
 the perceptron round (26 Nov 2026). Evidence labels as in the requirements specification, section 10. Read
 `docs/SPEC.md` next, then `docs/perceptron.md` and `docs/verification.md`.
 
+**Round in progress (26 Nov 2026): the dependability mosaic.** Plan, detailed design, steps and progress log are in
+`docs/mosaic.md`; the work is on branch `mosaic` (and the leaky-cell probe on `probe-leaky`). `main` stays at the
+verified perceptron design until the mosaic is verified to the same level.
+
 ## 1. State in one paragraph
 
 BPX-1 is a branch-prediction coprocessor for Tiny Tapeout (SKY130, 2×2 tiles). On the owners' requirement of
