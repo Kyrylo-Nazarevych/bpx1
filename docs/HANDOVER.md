@@ -50,7 +50,7 @@ the mirror: copy them back to the Windows folder after generating (the sync is o
 | D11 | The tables' read port is reserved for a predict only in the clock it executes (deadlock fix). | verification.md 4 |
 | D12 | **ID width 8 bits** (10 before): no measurable loss; `uio[1:0]` become outputs `PBIM`, `PGSH`; with `DBG0`/`DBG1` (reset selections) all four predictions are on pins with every `ACK`. | perceptron.md 7 **(VERIFIED, 4,000 candidates)** |
 | D13 | `CONF` is the confidence of the driving predictor (was: always the default's). Debug treats the four predictors alike. | perceptron.md 7; SPEC 2 |
-| D14 | **Clock 30 ns (33.3 MHz), latency still 3 clocks = 90 ns**, instead of a fourth clock at 25 ns (100 ns). | perceptron.md 6; timing.md **(VERIFIED)** |
+| D14 | **Clock 30 ns (33.3 MHz), latency still 3 clocks = 90 ns**, instead of a fourth clock at 25 ns (100 ns). Confirmed by the owner on 26 Nov 2026 ("Yes, keep it"). | perceptron.md 6; timing.md **(VERIFIED)** |
 | D15 | Switches CTRL[15:12]: reference inputs, negation, adaptive threshold (on after reset), binarised inference (experiment, off). Safe mode = all off, or a reference predictor driving. | perceptron.md 5; cosim_safe.md **(VERIFIED)** |
 | D16 | Rejected with data: probabilistic weight updates, binary weights, a fifth table, unary storage, bit-serial sum, precomputed sums. | perceptron.md 3–4 |
 
@@ -132,6 +132,4 @@ $12 in total.** No `bpx1-*` machine exists now **(VERIFIED: instance list after 
 
 ## 9. Open questions for the owners
 
-1. Is 33 MHz with 90 ns to answer acceptable, or do you want the 40 MHz variant with a fourth clock (100 ns)?
-   (perceptron.md 6; my recommendation is the present one.)
-2. Should binarised inference stay in the chip as an experiment (cost: about 40 cells on the predict path)?
+1. Should binarised inference stay in the chip as an experiment (cost: about 40 cells on the predict path)?
