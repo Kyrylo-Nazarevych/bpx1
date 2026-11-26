@@ -10,6 +10,7 @@ import sys
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge, Timer
+from cocotb.utils import get_sim_time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "model"))
 import bpx1  # noqa: E402
@@ -157,7 +158,7 @@ async def compare_state(h, m):
     tw = await h.dump(bpx1.SPACE_TWIN, n3)
     assert tw == [m.raw(bpx1.SPACE_TWIN, k) for k in range(n3)], f"twin (space 12) {tw} differs from the model"
     f = await h.spi(0x11, n=2)
-    assert f == [m.fctl, m.fstat], f"FCTL, FSTAT {f} != model {[m.fctl, m.fstat]}"
+    assert f == [m.fctl, m.fstat_reg], f"FCTL, FSTAT {f} != model {[m.fctl, m.fstat_reg]}"
 
 
 async def compare_stats(h, m):
@@ -338,6 +339,16 @@ async def checked_request(h, m, op, ident, what):
         if not exp.refused & bpx1.ERR_PREDICT_FULL:
             d0, d1 = m.dbg_pins()
             assert h.pins == [d0, m.last_preds[1], m.last_preds[2], d1], f"{what}: pins {h.pins}, model {[d0, m.last_preds[1], m.last_preds[2], d1]}"
+            # one clock after the ACK: the canary's event (docs/mosaic.md 7.5) and the levels (RTL only: at gate level
+            # the unit cell delays move the clock in which the host sees ACK)
+            if not GATES:
+                await RisingEdge(h.dut.clk)
+                await Timer(1, unit="ns")
+                v = int(h.dut.uo_out.value)
+                for k, e in enumerate(m.dbg_pins(post=True)):
+                    if e is not None:
+                        assert (v >> (5 + k)) & 1 == e, f"{what}: DBG{k} one clock after ACK {(v >> (5 + k)) & 1}, model {e}"
+    return exp
 
 
 @cocotb.test()
@@ -347,16 +358,20 @@ async def mosaic_registers(dut):
     await start(dut)
     h = Host(dut, random.Random(SEED + 3000))
     m = bpx1.Bpx1()
+    # at gate level the write-pulse setting (FCTL[7:5]) stays 0: short pulses are a silicon experiment
+    pm = ~0x00E0 if GATES else 0xFFFF
     assert await h.spi(0x11, n=2) == [0, 0], "FCTL, FSTAT after reset"
     for v in (0xBEEE, 0x4000, 0xFFFE, 0x0000, 0x5552):
+        v &= pm
         await h.spi(0x11, [v])
         assert (await h.spi(0x11, n=1))[0] == v, f"FCTL does not hold {v:#06x}"
     await h.spi(0x02, [0x0001])                      # soft reset clears FCTL like CTRL
     await ClockCycles(dut.clk, 30)
     assert await h.spi(0x11, n=2) == [0, 0], "FCTL, FSTAT after soft reset"
-    # everything but TWIN_EN set: TWIN_USE needs TWIN_EN, so the predictions are plain; DBG shows the fault events
-    # (event 10: the default prediction with W3 = the plain default prediction)
-    await set_fctl(h, m, 0xFFFE)
+    # everything but TWIN_EN set: TWIN_USE needs TWIN_EN, so the lookups are plain; DBG shows the fault events
+    # (event 10: the default prediction with W3 = the plain default prediction).  CTEST makes the canary fire at
+    # every predict, so with DEMOTE the fourth one demotes the chip: from then on the tournament drives.
+    await set_fctl(h, m, 0xFFFE & pm)
     rng = random.Random(SEED + 3001)
     hist = {}
     ids = [rng.randrange(256) for _ in range(12)]
@@ -373,9 +388,11 @@ async def mosaic_registers(dut):
         tk = outcome(m.queue[0]["id"], hist)
         await checked_request(h, m, bpx1.OP_SPECIAL, bpx1.SUB_RESOLVE_T if tk else bpx1.SUB_RESOLVE_NT, "drain")
     await ClockCycles(dut.clk, 8)
-    await compare_state(h, m)                        # includes the twin, read as 0, and FSTAT = 0
+    assert m.dem and m.fstat == bpx1.CANARY, f"model: canary and demotion expected, FSTAT {m.fstat_reg:#x}"
+    await compare_state(h, m)                        # includes the twin, read as 0, and FSTAT = CANARY | DEMOTED
     await compare_stats(h, m)
-    dut._log.info("mosaic registers: FCTL storage and resets, FSTAT 0, plain behaviour with the twin's data off")
+    dut._log.info("mosaic registers: FCTL storage and resets; with the twin's data off and CTEST, DEMOTE: canary "
+                  "at every predict, demoted after the fourth; replies, pins, state and FSTAT equal the model")
 
 
 @cocotb.test(skip=GATES)
@@ -414,7 +431,7 @@ async def twin_directed(dut):
                 await checked_request(h, m, bpx1.OP_PREDICT, ident, f"code {code} use {use} flips {fl}")
                 assert m.last_tw is not None
                 seen.add((code, m.last_tw["outcome"], use))
-                assert (await h.spi(0x12, n=1))[0] == m.fstat, f"FSTAT, code {code} flips {fl}: model {m.fstat:#x}"
+                assert (await h.spi(0x12, n=1))[0] == m.fstat_reg, f"FSTAT, code {code} flips {fl}: model {m.fstat_reg:#x}"
                 await checked_request(h, m, bpx1.OP_SPECIAL, bpx1.SUB_FLUSH, "flush")
     want = {(cd, o, u) for cd in range(4) for o in {0: (0, 5, 6), 1: (0, 3, 5, 6), 2: (0, 1, 2, 3, 4, 5), 3: (0, 3, 5)}[cd] for u in (0, 1)}
     assert want <= seen, f"decode outcomes not reached: {sorted(want - seen)}"
@@ -441,3 +458,263 @@ async def twin_directed(dut):
     await ClockCycles(dut.clk, 8)
     await compare_state(h, m)
     dut._log.info(f"twin: {len(seen)} (code, outcome, TWIN_USE) combinations, restore-on-use {rest}; state equals the model")
+
+
+# ---------------------------------------------------------------------------------------------------- mosaic step 4
+def core_of(dut):
+    """bpx_core inside the testbench (repository top: tt_um -> bpx_chip; Makefile.bpx: bpx_chip)."""
+    u = dut.user_project
+    return u.u_chip.u_core if hasattr(u, "u_chip") else u.u_core
+
+
+async def resolve_all(h, m, hist):
+    while m.queue:
+        tk = outcome(m.queue[0]["id"], hist)
+        await checked_request(h, m, bpx1.OP_SPECIAL, bpx1.SUB_RESOLVE_T if tk else bpx1.SUB_RESOLVE_NT, "drain")
+
+
+@cocotb.test(skip=GATES)
+async def pulse_settings(dut):
+    """Write-pulse selector (docs/mosaic.md 7.4).  With the latch cells and the delay-cell model (0.57 ns per cell,
+    test/sky130_cells_sim.v): the pulse of W0-W2 has the width of its tap at every setting while the standard pulse
+    keeps half a clock; at every setting raw writes and training of W0-W3 land exactly as in the golden model (in
+    simulation every setting writes; failures are a silicon experiment).  Flip-flop model: no effect."""
+    await start(dut)
+    h = Host(dut, random.Random(SEED + 5000))
+    m = bpx1.Bpx1()
+    rng = random.Random(SEED + 5001)
+    core = core_of(dut)
+    ws, pr = core.u_wseq, core.u_pred
+    structural = hasattr(ws, "u_wpx")
+    # the pulse as each table receives it: W0-W2 the selected one, the others (BC, G, W3, twin) the standard one
+    tabs = {"W0": pr.g_t[0].u_t, "W1": pr.g_t[1].u_t, "W2": pr.g_t[2].u_t, "W3": pr.g_t[3].u_t, "BC": pr.u_bc,
+            "G": pr.u_g, "twin": pr.u_tw}
+    widths = {"x": [], "s": []}
+    widths.update({k: [] for k in tabs})
+
+    async def watch(sig, key):
+        while True:
+            await RisingEdge(sig)
+            t0 = get_sim_time(unit="ps")
+            await FallingEdge(sig)
+            widths[key].append(get_sim_time(unit="ps") - t0)
+
+    tasks = [cocotb.start_soon(watch(ws.wpulse_x, "x")), cocotb.start_soon(watch(ws.wpulse, "s"))]
+    tasks += [cocotb.start_soon(watch(t.wpulse, k)) for k, t in tabs.items()]
+    taps = [0, 1, 2, 3, 4, 6, 8, 12]
+    hist, ids = {}, [rng.randrange(256) for _ in range(16)]
+    seen = {}
+    for s in range(8):
+        await set_fctl(h, m, s << bpx1.FCTL_PULSE_SHIFT)
+        await ClockCycles(dut.clk, 4)
+        for w in widths.values():
+            w.clear()
+        for t in range(8, 12):                       # raw writes of W0-W3, read back
+            a, v = rng.randrange(32), rng.randrange(16)
+            await raw_wr(h, m, t, a, v)
+            got = await raw_rd(h, t, a)
+            assert got == m.raw(t, a), f"setting {s}: raw write of W{t - 8}[{a}] = {v}, read {got}"
+        for n in range(60):                          # training at this setting
+            ident = rng.choice(ids)
+            if rng.random() < 0.6:
+                await checked_request(h, m, bpx1.OP_PREDICT_RESOLVE_T if outcome(ident, hist) else bpx1.OP_PREDICT_RESOLVE_NT, ident, f"setting {s} op {n}")
+            else:
+                await checked_request(h, m, bpx1.OP_PREDICT, ident, f"setting {s} op {n}")
+                await resolve_all(h, m, hist)
+        await ClockCycles(dut.clk, 8)
+        for i in range(4):
+            tab = await h.dump(8 + i, 32)
+            assert tab == [m.raw(8 + i, k) for k in range(32)], f"setting {s}: weight table {i} differs from the model"
+        wx, wsd = sorted(set(widths["x"])), sorted(set(widths["s"]))
+        seen[s] = (wx, wsd, len(widths["x"]))
+        assert widths["x"] and len(widths["x"]) == len(widths["s"]), f"setting {s}: pulses {widths}"
+        exp = CLK_NS * 500 if (s == 0 or not structural) else round(taps[s] * 570)
+        assert wsd == [CLK_NS * 500], f"setting {s}: standard pulse widths {wsd} ps"
+        assert wx == [exp], f"setting {s}: W0-W2 pulse widths {wx} ps, expected {exp}"
+        for k in tabs:
+            want = exp if k in ("W0", "W1", "W2") else CLK_NS * 500
+            assert sorted(set(widths[k])) == [want] and len(widths[k]) == len(widths["s"]), \
+                f"setting {s}: table {k} received pulses {sorted(set(widths[k]))} ps ({len(widths[k])}), expected {want}"
+    for tk in tasks:
+        tk.cancel()
+    await set_fctl(h, m, 0)
+    await compare_state(h, m)
+    dut._log.info(f"pulse settings ({'latch cells' if structural else 'flip-flop model'}): widths in ps by setting "
+                  f"(W0-W2, standard, pulses) {seen}; tables equal the model at every setting")
+
+
+@cocotb.test(skip=GATES)
+async def checkers_watchdog(dut):
+    """The four invariant checkers and the hang watchdog (docs/mosaic.md 7.5), RTL only: each fired once by
+    depositing an upset into an internal register; FSTAT shows exactly its flag, DBG its fault event (5 any checker,
+    6 watchdog), CMD bit 2 clears it; afterwards the chip still equals the golden model."""
+    await start(dut)
+    h = Host(dut, random.Random(SEED + 6000))
+    m = bpx1.Bpx1()
+    core = core_of(dut)
+    m.dsel = [bpx1.EV_CHECKER, bpx1.EV_WDOG]
+    await h.spi(0x01, [m.ctrl_word()])
+    await set_fctl(h, m, bpx1.FCTL_DBGF)
+    cnt = [0, 0]
+
+    async def mon():
+        while True:
+            await RisingEdge(dut.clk)
+            await Timer(1, unit="ns")
+            v = int(dut.uo_out.value)
+            cnt[0] += (v >> 5) & 1
+            cnt[1] += (v >> 6) & 1
+
+    mt = cocotb.start_soon(mon())
+
+    async def check(flags, what, ev):
+        await ClockCycles(dut.clk, 4)
+        f = (await h.spi(0x12, n=1))[0]
+        assert f == flags, f"{what}: FSTAT {f:#06x}, expected {flags:#06x}"
+        assert cnt[ev] > 0, f"{what}: fault event {5 + ev} not seen on DBG{ev}"
+        res = (what, f, cnt[0], cnt[1])
+        await h.spi(0x02, [0x0004])                  # CMD bit 2
+        m.clear_stats()
+        await ClockCycles(dut.clk, 4)
+        f = (await h.spi(0x12, n=1))[0]
+        assert f == 0, f"{what}: FSTAT {f:#06x} after CMD bit 2"
+        cnt[0] = cnt[1] = 0
+        return res
+
+    log = []
+    assert (await h.spi(0x12, n=1))[0] == 0 and cnt == [0, 0]
+    # queue: FULL set while the queue is empty (FULL is rewritten every clock: one firing)
+    await FallingEdge(dut.clk)
+    core.full.value = 1
+    log.append(await check(bpx1.CHK_QUEUE, "queue checker", 0))
+    # staging: the staging-valid bit set with an empty queue (fires until a FLUSH clears it)
+    await FallingEdge(dut.clk)
+    core.stg_v.value = 1
+    await ClockCycles(dut.clk, 3)
+    await checked_request(h, m, bpx1.OP_SPECIAL, bpx1.SUB_FLUSH, "flush")
+    log.append(await check(bpx1.CHK_STAGE, "staging checker", 0))
+    # write sequencer: both state flops set; the extra pulse rewrites the entry the last write wrote, with its data
+    a3 = 5
+    await raw_wr(h, m, 8, a3, m.raw(8, a3))
+    await FallingEdge(dut.clk)
+    core.u_wseq.s1.value = 1
+    core.u_wseq.a.value = 1
+    log.append(await check(bpx1.CHK_WSEQ, "write-sequencer checker", 0))
+    # handshake: ACK flipped with nothing pending (OP/ID = NOP, so the phantom request is a NOP that flips it back)
+    h.ui, h.uio = 0, h.uio & 0x70
+    h._drive()
+    await ClockCycles(dut.clk, 4)
+    await FallingEdge(dut.clk)
+    core.ack.value = 1 - int(core.ack.value)
+    log.append(await check(bpx1.CHK_HANDSHAKE, "handshake checker", 0))
+    # watchdog: a pending predict blocked for 70 clocks (resolve-pending set with an empty queue, which the staging
+    # checker also reports), then released
+    assert not m.queue
+    await FallingEdge(dut.clk)
+    core.rpend.value = 1
+    ident = 0x5A
+    h.ui, h.uio = ident, (h.uio & 0x70) | (bpx1.OP_PREDICT << 2)
+    h._drive()
+    a0 = h.ack()
+    h.req ^= 1
+    h._drive()
+    await ClockCycles(dut.clk, 70)
+    assert h.ack() == a0, "the blocked predict was answered"
+    await FallingEdge(dut.clk)
+    core.rpend.value = 0
+    for _ in range(20):
+        await RisingEdge(dut.clk)
+        if h.ack() != a0:
+            break
+    assert h.ack() != a0, "no answer after the release"
+    exp = m.request(bpx1.OP_PREDICT, ident)
+    await Timer(1, unit="ns")
+    assert (int(dut.uo_out.value) >> 1) & 1 == exp.pred, "released predict: PRED differs from the model"
+    log.append(await check(bpx1.CHK_STAGE | bpx1.WDOG, "watchdog", 1))
+    mt.cancel()
+    await resolve_all(h, m, {})
+    await ClockCycles(dut.clk, 8)
+    await compare_state(h, m)
+    await compare_stats(h, m)
+    dut._log.info(f"checkers and watchdog: (what, FSTAT, DBG0 clocks, DBG1 clocks) {log}; cleared; state equals the model")
+
+
+@cocotb.test(skip=GATES)
+async def canary_demotion(dut):
+    """Canary self-test and demotion (docs/mosaic.md 7.5, 7.6) against the golden model: CTEST makes the canary fire
+    one clock after every answered predict (FSTAT bit 4, fault event 4); four detected twin errors (double errors,
+    SEC-DED) with DEMOTE set DEMOTED (bit 10, event 7): the tournament then drives instead of the default predictor;
+    DEMOTE = 0 suspends it, CMD bit 2 ends it."""
+    await start(dut)
+    h = Host(dut, random.Random(SEED + 7000))
+    m = bpx1.Bpx1()
+    rng = random.Random(SEED + 7001)
+    hist = {}
+    m.dsel = [bpx1.EV_CANARY, bpx1.EV_DEMOTED]
+    await h.spi(0x01, [m.ctrl_word()])
+
+    async def fstat_is(what):
+        f = (await h.spi(0x12, n=1))[0]
+        assert f == m.fstat_reg, f"{what}: FSTAT {f:#06x}, model {m.fstat_reg:#06x}"
+        return f
+
+    # canary self-test (the post-ACK DBG check of checked_request sees event 4)
+    await set_fctl(h, m, bpx1.FCTL_CTEST | bpx1.FCTL_DBGF)
+    for n in range(3):
+        await checked_request(h, m, bpx1.OP_PREDICT, 0x10 + n, f"CTEST predict {n}")
+    await resolve_all(h, m, hist)
+    assert m.fstat == bpx1.CANARY and m.dcnt == 3 and not m.dem
+    f_can = await fstat_is("canary")
+    await h.spi(0x02, [0x0004])
+    m.clear_stats()
+    await fstat_is("after CMD bit 2")
+    await set_fctl(h, m, bpx1.FCTL_DBGF)
+    await checked_request(h, m, bpx1.OP_PREDICT_RESOLVE_T, 0x21, "no CTEST")
+    # demotion by twin errors: default drives, TWIN_EN, SEC-DED, DEMOTE; a double error in each read entry
+    await set_fctl(h, m, bpx1.FCTL_TWIN_EN | (bpx1.CODE_SECDED << 2) | bpx1.FCTL_DEMOTE | bpx1.FCTL_DBGF)
+    k = 0
+    while not m.dem:
+        ident = rng.randrange(256)
+        a = m._lookup(ident, m.sh, m.psh).idx[-1]
+        await raw_wr(h, m, bpx1.SPACE_TWIN, a, m.tw[a] ^ 0x41)
+        await checked_request(h, m, bpx1.OP_PREDICT, ident, f"twin error {k}")
+        await resolve_all(h, m, hist)
+        k += 1
+        assert k <= 8, "not demoted after 8 injected double errors"
+    f_dem = await fstat_is("demoted")
+    assert f_dem & bpx1.DEMOTED
+    # a branch whose tournament prediction differs from the default prediction: its bimodal counter strongly taken
+    # (chooser 1: the tournament follows it), its four weights at the not-taken limit (the twin entry rewritten too)
+    target = 0x6B
+    L = m._lookup(target, m.sh, m.psh)
+    await raw_wr(h, m, 0, L.bi, 3 | (1 << 2))
+    for i in range(len(m.cfg.weights)):
+        await raw_wr(h, m, 8 + i, L.idx[i], 0x7 if L.neg[i] else 0x8)
+    await raw_wr(h, m, bpx1.SPACE_TWIN, L.idx[-1], bpx1.tw_encode(m.wt[-1][L.idx[-1]]))
+    L = m._lookup(target, m.sh, m.psh)
+    assert L.p_def != L.p_trn, f"target branch: default {L.p_def}, tournament {L.p_trn}"
+    # demoted: the tournament answers; the target branch shows it
+    r = await checked_request(h, m, bpx1.OP_PREDICT, target, "demoted, target")
+    assert r.pred == m.last_preds[3] != m.last_preds[0], "demoted: PRED must be the tournament's, unlike the default's"
+    await checked_request(h, m, bpx1.OP_SPECIAL, bpx1.SUB_FLUSH, "flush")
+    # suspended: DEMOTE = 0 (DEMOTED stays set), the default predictor answers again
+    await set_fctl(h, m, m.fctl & ~bpx1.FCTL_DEMOTE)
+    r = await checked_request(h, m, bpx1.OP_PREDICT, target, "suspended, target")
+    assert r.pred == m.last_preds[0], "suspended: PRED must be the default predictor's"
+    await checked_request(h, m, bpx1.OP_SPECIAL, bpx1.SUB_FLUSH, "flush")
+    await fstat_is("suspended")
+    # resumed, then ended by CMD bit 2
+    await set_fctl(h, m, m.fctl | bpx1.FCTL_DEMOTE)
+    r = await checked_request(h, m, bpx1.OP_PREDICT, target, "resumed, target")
+    assert r.pred == m.last_preds[3]
+    await checked_request(h, m, bpx1.OP_SPECIAL, bpx1.SUB_FLUSH, "flush")
+    await h.spi(0x02, [0x0004])
+    m.clear_stats()
+    await fstat_is("cleared")
+    r = await checked_request(h, m, bpx1.OP_PREDICT, target, "cleared, target")
+    assert r.pred == m.last_preds[0] and not m.dem
+    await resolve_all(h, m, hist)
+    await ClockCycles(dut.clk, 8)
+    await compare_state(h, m)
+    dut._log.info(f"canary: FSTAT {f_can:#06x} after 3 CTEST predicts; demotion after {k} injected double errors "
+                  f"(FSTAT {f_dem:#06x}); tournament drives, suspended, resumed, cleared; state equals the model")

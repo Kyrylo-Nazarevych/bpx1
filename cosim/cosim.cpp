@@ -63,7 +63,20 @@ static void bg_xfer(int addr, bool wr, const u32* v, int n) {
     }
     bg_add(0, 4); bg_add(0x10, 6);
 }
-static void tick() { bg_tick(); top->clk = 1; top->eval(); top->clk = 0; top->eval(); chip_cycles++; }
+// DBG one clock after the ACK of an accepted predict (fault events that happen in the clock after it: the canary;
+// docs/mosaic.md 7.5): checked after the first clock that follows the acknowledge, whatever step comes next
+static int post_mask = 0, post_val = 0; static unsigned long long post_line = 0, post_bad = 0;
+static void tick() {
+    bg_tick(); top->clk = 1; top->eval(); top->clk = 0; top->eval(); chip_cycles++;
+    if (post_mask) {
+        int g = ((top->uo_out >> 5) & 1) | (((top->uo_out >> 6) & 1) << 1);
+        if ((g & post_mask) != (post_val & post_mask)) {
+            if (!post_bad) fprintf(stderr, "line %llu: DBG one clock after ACK %d, model %d (mask %d)\n", post_line, g, post_val, post_mask);
+            post_bad++;
+        }
+        post_mask = 0;
+    }
+}
 
 static u32 fold(u64 v, int inb, int outb) { v &= (inb >= 64 ? ~0ull : ((1ull << inb) - 1)); u32 r = 0; while (v) { r ^= (u32)(v & ((1u << outb) - 1)); v >>= outb; } return r; }
 static u32 fold_id(u32 pc) { return fold((u64)(pc >> 2), 30, 8); }
@@ -204,7 +217,8 @@ static int rand_play(const char* path, const char* latpath, const char* clpath) 
             int got = ((top->uo_out >> 1) & 1) | (((top->uo_out >> 2) & 1) << 1);
             if (exp & 64)                                    // an accepted predict: the four predictions on the pins
                 got |= (((top->uo_out >> 5) & 1) | ((top->uio_out & 3) << 1) | (((top->uo_out >> 6) & 1) << 3)) << 2 | 64;
-            if (op != 0 && got != exp) { if (!bad) fprintf(stderr, "line %llu: op %d id %d reply %d, model %d\n", (unsigned long long)line, op, id, got, exp); bad++; }
+            if (op != 0 && got != (exp & 127)) { if (!bad) fprintf(stderr, "line %llu: op %d id %d reply %d, model %d\n", (unsigned long long)line, op, id, got, exp & 127); bad++; }
+            post_mask = (exp >> 7) & 3; post_val = (exp >> 9) & 3; post_line = line;   // bits 7-10: DBG one clock later
             if (lf) fputc(n > 255 ? 255 : n, lf);
             nr++;
         } else if (c == 'W') {
@@ -243,6 +257,8 @@ static int rand_play(const char* path, const char* latpath, const char* clpath) 
         } else return 2;
     }
     bg_idle(); bg_flush(cl);
+    if (post_mask) tick();
+    bad += post_bad;
     if (lf) fclose(lf);
     if (cl) { fclose(cl); printf("background_jobs=%llu dropped=%llu ", (unsigned long long)bg_jobs, (unsigned long long)bg_dropped); }
     printf("requests=%llu reply_mismatches=%llu stat_checks=%llu stat_mismatches=%llu state_dumps=%llu state_word_mismatches=%llu control_writes=%llu chip_clocks=%llu\n",

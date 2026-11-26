@@ -221,37 +221,71 @@ endmodule
 //   wpulse = a & b:  a is set at the rising edge that starts cycle 2 and cleared at the next one;
 //                    b is clocked on the falling edge and is the complement of a, half a cycle late.
 // So wpulse rises when a rises (b already 1) and falls when b falls (a still 1): one cause per edge, no glitch.
+// wpulse (gate u_wp) is the standard pulse: bimodal/chooser, gshare, W3, the twin W3L, the statistics snapshot.
+//
+// Write-pulse selector (docs/mosaic.md 7.4): wpulse_x, from its own gate u_wpx, is the pulse of the weight tables
+// W0-W2 only:  wpulse_x = a & b & ~d,  d = 0 for setting 0 (then wpulse_x has the standard width), otherwise tap
+// k of a delay line on a (taps after 1, 2, 3, 4, 6, 8, 12 cells sky130_fd_sc_hd__dlygate4sd3_1).  The pulse rises
+// with a and falls when the tap rises (or when b falls, if that is earlier); d falls only after a has fallen, when
+// the pulse is already over, so each edge still has one cause.  The setting is taken from FCTL[7:5] only while the
+// sequencer is idle, so it never changes while a or any tap is high.  Behavioural and formal models: no effect.
+// bad = s1 & a: two sequencer states at once, which cannot occur (an invariant checker of the core, 7.5).
 module bpx_wseq (
-    input  wire clk,
-    input  wire rst,
-    input  wire req,
-    output wire wcap,
-    output wire wact,
-    output wire wpulse,
-    output wire busy
+    input  wire       clk,
+    input  wire       rst,
+    input  wire       req,
+    input  wire [2:0] psel_in,      // FCTL[7:5]
+    output wire       wcap,
+    output wire       wact,
+    output wire       wpulse,
+    output wire       wpulse_x,     // pulse of W0-W2
+    output wire       busy,
+    output wire       bad
 );
   reg s1, a, b;
+  reg [2:0] psel;
   assign wcap = req & ~s1;
   always @(posedge clk) begin
     if (rst) begin
-      s1 <= 1'b0;
-      a  <= 1'b0;
+      s1   <= 1'b0;
+      a    <= 1'b0;
+      psel <= 3'd0;
     end else begin
       s1 <= wcap;
       a  <= s1;
+      if (!busy) psel <= psel_in;
     end
   end
   assign wact = a;
   assign busy = s1 | a;
+  assign bad  = s1 & a;
 `ifdef FORMAL
   // single-edge model for the proofs: the behavioural tables write on wact and do not use the pulse
-  assign wpulse = 1'b0;
+  assign wpulse   = 1'b0;
+  assign wpulse_x = 1'b0;
   always @(posedge clk) b <= 1'b0;
+  wire _unused_ps = &{1'b0, psel};
 `elsif BPX_BEHAV
   always @(negedge clk) b <= ~a;
-  assign wpulse = a & b;
+  assign wpulse   = a & b;
+  assign wpulse_x = a & b;
+  wire _unused_ps = &{1'b0, psel};
 `else
   always @(negedge clk) b <= ~a;
   (* keep *) sky130_fd_sc_hd__and2_1 u_wp (.A(a), .B(b), .X(wpulse));
+  // delay line on a: tap[k] after k cells
+  wire [12:0] tap;
+  assign tap[0] = a;
+  genvar k;
+  generate
+    for (k = 0; k < 12; k = k + 1) begin : g_dl
+      (* keep *) sky130_fd_sc_hd__dlygate4sd3_1 u_dly (.A(tap[k]), .X(tap[k+1]));
+    end
+  endgenerate
+  // static one-hot select of the tap (setting 0: no tap, d = 0), hand-mapped AND-OR: one path per tap
+  wire [7:0] tsel = 8'd1 << psel;
+  wire       d;
+  bpx_aor #(.N(8)) u_tmux (.a({tap[12], tap[8], tap[6], tap[4], tap[3], tap[2], tap[1], 1'b0}), .b({tsel[7:1], 1'b0}), .y(d));
+  (* keep *) sky130_fd_sc_hd__and3b_1 u_wpx (.A_N(d), .B(a), .C(b), .X(wpulse_x));
 `endif
 endmodule

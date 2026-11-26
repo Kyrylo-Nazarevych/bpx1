@@ -12,6 +12,8 @@ word, that it equals the model's value after some whole number n of requests, lo
   raw reads    the entry as it is after n requests: never a half-written or stale value (space 12, the leaky
                twin, included: FCTL, and with it the read mask TWIN_EN, changes only between foreground steps)
   ERRCNT and the error flags lie between their values at lo and at hi; ID and CTRL are exact
+The model keeps its fault state (FSTAT, the demotion count, DEMOTED) across requests: demotion changes the driving
+prediction and with it the speculative history that raw reads of space 7 see.
 """
 import sys
 
@@ -99,7 +101,8 @@ def main():
                 cum[1 + i] += m.mis[i]
             errs[0] += m.n_err
             flags[0] |= m.err_flags & 3
-            m.clear_stats()
+            m.clear_counters()                           # not clear_stats(): FSTAT and demotion carry on
+
             n += 1
         elif t[0] == "W" and t[1] == "1":
             m.write_ctrl(int(t[2]))

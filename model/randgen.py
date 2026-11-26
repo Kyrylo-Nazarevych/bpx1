@@ -5,8 +5,9 @@
 
 out.ops is played against the RTL by `cosim --rand` (cosim/cosim.cpp), one line per step:
   R op id expected gap setup     a request; expected = PRED | CONF<<1 [| the four prediction pins <<2 | 64 for an
-                                 accepted predict]; gap = idle clocks before it; setup = clocks
-                                 ID/OP are placed before REQ toggles
+                                 accepted predict [| DBG0, DBG1 one clock after the ACK: check mask <<7, values
+                                 <<9]]; gap = idle clocks before it; setup = clocks ID/OP are placed before REQ
+                                 toggles
   W addr value                   a control-port write (CTRL, CMD, FCTL, or RAW_ADDR and RAW_DATA for a raw write)
   S / C  resolved m0 m1 m2 m3 errors flags queue     snapshot (S) or snapshot-and-clear (C), then compare
   D space count w...             read `count` raw words of a state space and compare (FR-10)
@@ -14,8 +15,13 @@ out.ops is played against the RTL by `cosim --rand` (cosim/cosim.cpp), one line 
 Mosaic (docs/mosaic.md 7.2, 7.3): FCTL changes in mid-stream (twin on/off, TWIN_USE, CODE, RESTORE, the fault-event
 bank on DBG with random event selections, random storage bits), fault injection by raw writes of single, double
 and triple bit flips into twin words (space 12) and of new weights into W3 (space 11), FSTAT reads, and clears of
-FSTAT by CMD bit 2 (not in `conc` runs: it clears the statistics too).  Environment RG_PLAIN=1: none of this
-(FCTL stays 0; the steps are those of the generator before the mosaic, plus reads of space 12, FCTL and FSTAT).
+FSTAT by CMD bit 2 (not in `conc` runs: it clears the statistics too).  Steps 4 (docs/mosaic.md 7.4-7.6): random
+write-pulse settings (no effect here), the canary self-test CTEST and DEMOTE in random FCTL values, and demotion
+sequences: the default predictor drives, the twin is on with SEC-DED or detect-all and DEMOTE, then double-bit
+errors are injected into the twin entries that coming predicts read (or CTEST is set) until the fourth detected
+fault demotes the chip; the tournament then drives; later CMD bit 2 (or, in `conc` runs and in the stretch without
+clears, DEMOTE = 0) ends it.  Environment RG_PLAIN=1: none of this (FCTL stays 0; the steps are those of the
+generator before the mosaic, plus reads of space 12, FCTL and FSTAT).
 With `conc` the control port works while the requests run (FR-10 during a live run): no foreground statistics
 steps; instead background jobs that `cosim --rand` starts and does not wait for (dropped if one is still running):
   X S / X C                      snapshot / snapshot-and-clear, then read STATUS, ERRCNT and the ten statistics words
@@ -66,18 +72,23 @@ def main():
     spaces = [(0, cfg.NB), (1, cfg.NG)] + [(8 + i, e) for i, (e, _) in enumerate(cfg.weights)]
     N3 = cfg.weights[-1][0]
     fclr = [0]                                           # FSTAT bits cleared since the last request (coverage)
+    dev = [0]                                            # demotion events since the last request (coverage):
+                                                         # 1 suspended (DEMOTE 1 -> 0 while DEMOTED), 2 resumed
+    dem_end = [None]                                     # request count at which a demotion sequence is ended
 
     def clear_stats():
-        fclr[0] |= m.fstat
+        fclr[0] |= m.fstat_reg
         ops.write("W 2 4\n")
         m.clear_stats()
 
     def set_fctl(f):
         """A random FCTL change; the DBG selections follow the fault-event bank (FCTL[14])."""
+        if m.dem and (m.fctl ^ f) & bpx1.FCTL_DEMOTE:
+            dev[0] |= 2 if f & bpx1.FCTL_DEMOTE else 1
         ops.write(f"W 17 {f}\n")
         m.write_fctl(f)
         if f & bpx1.FCTL_DBGF:
-            ev = [0, 1, 2, 3, 10]
+            ev = [0, 1, 2, 3, 4, 7, 10]
             want = [rng.choice(ev) if rng.random() < 0.85 else rng.randrange(16) for _ in range(2)]
         else:
             want = [10, 13]                              # the standard events the model tracks
@@ -88,10 +99,47 @@ def main():
     def new_fctl():
         if rng.random() < 0.15:
             return 0
-        f = rng.getrandbits(16) & ~0x401F                # bits without a function yet: storage only
+        # bits 8-12 without a function yet (storage only), the write-pulse setting [7:5] (no effect in this model)
+        f = rng.getrandbits(16) & ~(0x401F | bpx1.FCTL_DEMOTE | bpx1.FCTL_CTEST)
         f |= (1 if rng.random() < 0.85 else 0) | (2 if rng.random() < 0.5 else 0) | (rng.randrange(4) << 2)
         f |= (16 if rng.random() < 0.5 else 0) | (bpx1.FCTL_DBGF if rng.random() < 0.4 else 0)
+        f |= (bpx1.FCTL_DEMOTE if rng.random() < 0.25 else 0) | (bpx1.FCTL_CTEST if rng.random() < 0.05 else 0)
         return f
+
+    def demote_seq():
+        """Demotion: the default predictor drives, the twin is on with SEC-DED or detect-all and DEMOTE set; double
+        errors injected into the twin entries that coming predicts read (or CTEST) until DEMOTED; then the
+        tournament drives (checked in req()); the sequence is ended some requests later (dem_end)."""
+        if m.drive != bpx1.DRV_DEFAULT:
+            m.drive = bpx1.DRV_DEFAULT
+            ops.write(f"W 1 {m.ctrl_word()}\n")
+        canary = rng.random() < 0.3
+        f = bpx1.FCTL_TWIN_EN | (rng.choice([2, 3]) << 2) | bpx1.FCTL_DEMOTE | (rng.getrandbits(3) << bpx1.FCTL_PULSE_SHIFT)
+        f |= (bpx1.FCTL_DBGF if rng.random() < 0.5 else 0) | (bpx1.FCTL_RESTORE if rng.random() < 0.3 else 0)
+        f |= (bpx1.FCTL_TWIN_USE if rng.random() < 0.3 else 0) | (bpx1.FCTL_CTEST if canary else 0)
+        set_fctl(f)
+        k = 0
+        while not m.dem and k < 12:
+            ident = rng.choice(ids)
+            if not canary:
+                a = m._lookup(ident, m.sh, m.psh).idx[-1]
+                raw_wr(bpx1.SPACE_TWIN, a, m.tw[a] ^ sum(1 << b for b in rng.sample(range(8), 2)))
+            if len(m.queue) < cfg.DEPTH:
+                req(bpx1.OP_PREDICT, ident, rng.random() < 0.3)
+            else:
+                tk = outcome(m.queue[0]["id"], hist)
+                req(bpx1.OP_PREDICT_RESOLVE_T if tk else bpx1.OP_PREDICT_RESOLVE_NT, ident, rng.random() < 0.3)
+            k += 1
+        if canary:
+            set_fctl(m.fctl & ~bpx1.FCTL_CTEST)
+        return k
+
+    def end_demotion(clear_ok):
+        dem_end[0] = None
+        if not conc and clear_ok and rng.random() < 0.7:
+            clear_stats()                                # CMD bit 2: count and DEMOTED cleared
+        else:
+            set_fctl(m.fctl & ~bpx1.FCTL_DEMOTE)         # suspended: DEMOTED stays, the default predictor drives
 
     def raw_wr(space, a, v):
         ops.write(f"W 15 {0x3000 | (space << 8) | a}\nW 16 {v}\n")
@@ -131,7 +179,7 @@ def main():
         if tmp:
             ops.write(f"W 17 {f0}\n")
             m.write_fctl(f0)
-        ops.write(f"G 17 {m.fctl}\nG 18 {m.fstat}\n")
+        ops.write(f"G 17 {m.fctl}\nG 18 {m.fstat_reg}\n")
 
     def req(op, arg, fast):
         depth = len(m.queue)
@@ -139,8 +187,11 @@ def main():
         Lp = m._lookup(arg, m.sh, m.psh) if op != bpx1.OP_SPECIAL else None
         m.last_train = None
         frozen, drive, feat = m.frozen, m.drive, m.feat
-        fs0 = m.fstat
+        fs0 = m.fstat_reg
+        deff = m.demoted and m.drive == bpx1.DRV_DEFAULT             # the demotion applies to this predict
+        dno = m.demoted and m.drive != bpx1.DRV_DEFAULT              # demoted, but CTRL selects another predictor
         m.last_tw = None
+        m.fault_log = []
         rep = m.request(op, arg)
         sub = arg & 3
         cls = 0 if op == bpx1.OP_PREDICT else 1 if op != bpx1.OP_SPECIAL else (4 if sub == 0 else 3 if sub == 1 else 2)
@@ -170,21 +221,42 @@ def main():
         exp = rep.pred | (rep.conf << 1)
         pexec = op != bpx1.OP_SPECIAL and not rep.refused & bpx1.ERR_PREDICT_FULL
         dseen, tchg = 0, 0
+        if pexec and deff:
+            assert rep.pred == m.last_preds[3], "a demoted chip answers with the tournament's prediction"
         if pexec:
             d0, d1 = m.dbg_pins()
             exp |= 64 | (d0 << 2) | (m.last_preds[1] << 3) | (m.last_preds[2] << 4) | (d1 << 5)   # DBG0, PBIM, PGSH, DBG1
+            # one clock after the ACK (the canary's event; untracked standard events are not checked)
+            for j, v in enumerate(m.dbg_pins(post=True)):
+                if v is not None:
+                    exp |= (1 << (7 + j)) | (v << (9 + j))
             if m.fctl & bpx1.FCTL_DBGF:
-                for k, v in zip(m.dsel, (d0, d1)):
+                p0, p1 = m.dbg_pins(post=True)
+                for k, v, pv in zip(m.dsel, (d0, d1), (p0, p1)):
                     if v and k in (0, 1, 2, 3, 10):
                         dseen |= 1 << (4 if k == 10 else k)
+                    if (v or pv) and k == bpx1.EV_DEMOTED:
+                        dseen |= 1 << 5
+                    if pv and k == bpx1.EV_CANARY:
+                        dseen |= 1 << 6
             tchg = 1 if m.last_preds[0] != m.last_pdef3 else 0
         ops.write(f"R {op} {arg} {exp} {gap} {setup}\n")
         two = m.last_tw["outcome"] if (pexec and m.last_tw) else -1
         rest = t["restore"] if t is not None else -1
+        # demotion and canary (coverage): fault outcomes of this request, bit 0-2 count steps 0->1, 1->2, 2->3, bit 3
+        # DEMOTED set, bit 4 fourth fault with DEMOTE = 0 (blocked), bit 5 a fault from the twin, bit 6 from the canary
+        fev = 0
+        for src, what in m.fault_log:
+            fev |= (1 << what) if isinstance(what, int) else 8 if what == "set" else 16 if what == "blocked" else 0
+            fev |= 32 if src == "twin" else 64
+        dchg = 1 if (pexec and deff and m.last_preds[0] != rep.pred) else 0     # the demotion changed PRED
         meta.write(f"{cls} {depth} {misp} {rep.refused} {drive} {1 if frozen else 0} {rep.pred} {rep.conf} {feat} {lowp} {squash} "
                    f"{rfirst} {gap} {setup} {tr[0]} {tr[1]} {tr[2]} {tr[3]} {tr[4]} "
-                   f"{two} {m.code} {1 if m.twin_use else 0} {rest} {dseen} {m.fstat & ~fs0} {fclr[0]} {tchg}\n")
+                   f"{two} {m.code} {1 if m.twin_use else 0} {rest} {dseen} {m.fstat_reg & ~fs0} {fclr[0]} {tchg} "
+                   f"{1 if m.last_canary else 0} {1 if (pexec and deff) else 0} {fev} {dev[0]} {dchg} "
+                   f"{1 if (pexec and dno) else 0} {1 if (op != bpx1.OP_SPECIAL and rep.refused & bpx1.ERR_PREDICT_FULL) else 0}\n")
         fclr[0] = 0
+        dev[0] = 0
 
     def drain():
         while m.queue:
@@ -204,6 +276,9 @@ def main():
                 ids = [rng.randrange(NID) for _ in range(rng.choice([8, 48, 200]))]
         left -= 1
         if not plain:                                    # mosaic steps (a separate draw: RG_PLAIN keeps the old stream)
+            if dem_end[0] is not None and n >= dem_end[0]:
+                end_demotion(clear_ok)
+                continue
             r = rng.random()
             if r < 0.0012:
                 set_fctl(new_fctl())
@@ -212,7 +287,11 @@ def main():
                 inject()
                 continue
             if r < 0.0060:
-                ops.write(f"G 18 {m.fstat}\n")
+                ops.write(f"G 18 {m.fstat_reg}\n")
+                continue
+            if 0.0072 <= r < 0.0078 and dem_end[0] is None:
+                n += demote_seq()
+                dem_end[0] = n + rng.randint(4, 80)
                 continue
             if r < 0.0062:
                 ops.write(f"G 17 {m.fctl}\n")
@@ -285,7 +364,7 @@ def main():
             continue
         if r < 0.00298 and clear_ok:
             ops.write("W 2 1\n")                         # soft reset
-            fclr[0] |= m.fstat
+            fclr[0] |= m.fstat_reg
             m.reset()
             continue
         n += 1

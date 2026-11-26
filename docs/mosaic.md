@@ -225,6 +225,58 @@ A 2-bit saturating count of detected faults (TW_DET, CANARY, any checker, WDOG);
 DEMOTED is set and the driving predictor is the tournament whenever CTRL selects the default. Cleared by CMD bit 2
 and reset.
 
+**As built in step 4 (where it differs from or is more precise than 7.4–7.6):**
+
+- Timing exception audit (item 0). Every flop that can take data derived from a table read is enabled only by
+  `p_exec` (PRED, CONF, the queue entry, the speculative history, the last predictions `lp` and their DBG events,
+  `lpw` and fault event 10, the twin flags into FSTAT and fault events 0–3, the staging register of a predict with
+  an empty queue), `do_stage` (staging) or `drd_exec` with a table space (raw read data `dq`); all three require
+  the write sequencer idle (`~wbusy`, cycles 1 and 2 excluded, so the pulse cycle too). DBG takes the prediction
+  events through `p_exec ? preds : lp`, and the canary flops sample PRED/CONF's D, which is a table value only
+  under `p_exec`. The statistics counters take the queue's stored predictions (flops), never read data. Stated as
+  formal assertions (`!((p_exec | do_stage | drd_exec & d_tab) & wbusy)`, and with `wbusy` PRED/CONF's D is the
+  hold or refusal value) and proven. No flop violates it.
+- 7.4. The setting is copied from FCTL[7:5] into three flops of `bpx_wseq` only while the sequencer is idle, so a
+  write of FCTL that coincides with a pulse cannot change the tap during it (FCTL can be written at any clock). The
+  tap multiplexer is `bpx_aor` (N = 8, hand-mapped AOI cells, one path per tap); the pulse gate is
+  `sky130_fd_sc_hd__and3b_1 u_wpx` (A_N = tap, B = a, C = b); the delay line is 12 named
+  `sky130_fd_sc_hd__dlygate4sd3_1` (`u_dly`). The flow may not resize or remove any `u_dly` instance
+  (`RSZ_DONT_TOUCH_RX`, src/config.json): the resizer could otherwise swap a delay cell for a buffer.
+  Typical delays of `dlygate4sd3_1` A → X from the liberty files (input slew 0.1 ns, load 4 fF; rise / fall):
+  tt_025C_1v80 0.561 / 0.582 ns, ss_100C_1v60 1.071 / 1.158 ns, ff_n40C_1v95 0.390 / 0.394 ns (area 10.0 µm²).
+  The latch's own minimum GATE_N pulse (liberty, smallest slew) is 0.14 ns tt, 0.29 ns ss. The pulse widths per
+  setting from the post-layout netlist are in section 9. `test/sky130_cells_sim.v` models the cell with 0.57 ns;
+  the latch-cell test `pulse_settings` measures 0.57 × k ns on W0–W2 (k = 1, 2, 3, 4, 6, 8, 12) and the standard
+  half clock on BC, G, W3 and the twin, at every setting, and checks raw writes and training against the model.
+- 7.5 canary. On PRED and on CONF. The two real flops are named `dfxtp_1` cells too (`bpx_canary.u_q`), so that the
+  delay chain taps exactly the flop's D net. The chain is one `dlygate4sd1_1` (liberty: 0.21 / 0.26 ns tt,
+  0.40 / 0.50 ns ss, rise / fall), much shorter than the "about 2 ns" planned: the real CONF flop's slack at the
+  slow corner moved between builds (+2.18, +1.16, +2.46 ns), and the canary must keep +0.3 ns. The CTEST XOR
+  (`xor2_1`) sits on the shadow flop's output, off the timed path (first built in front of the shadow flop with
+  two, then one `dlygate4sd3_1`: the CONF canary missed setup by 0.39 and 0.34 ns; section 9). Measured lead of
+  the canary over its flop, final build: 0.20 ns (CONF) and 0.22 ns (PRED) typical, 0.40 and 0.48 ns at the slow
+  corner. The comparison is made in
+  the clock after PRED/CONF were loaded (an executed or a refused predict), so fault event 4 is a pulse one clock
+  after the ACK (it cannot come with the ACK); the random co-simulation checks DBG one clock after every ACK.
+- 7.5 checkers (FSTAT 5–8): queue (`qcnt > 4` or `FULL ≠ (qcnt = 4)`); staging (staging valid or a resolve
+  pending with an empty queue, or resolve-first done with no request seen); write sequencer (`s1 & a`, two states
+  at once, or a table-write request while busy, which would be lost); handshake (in a clock that followed a ready,
+  non-reset clock, ACK toggled exactly when a request was answered: catches a toggle without an answer and an
+  answer without a toggle).
+- 7.5 watchdog: counts the clocks a request is pending, restarting when it is answered and at every control-port
+  write (a write may legitimately hold requests: clear predictors; and the proofs leave the control port free in
+  every clock). SPI words are at least 128 clocks apart, so a real hang still reaches 64. The count wraps, so WDOG
+  (event 6) fires every 64 clocks while a hang lasts. Liveness bound, proven (k-induction, free inputs): the
+  count never exceeds 12, i.e. a request pending without a control-port write is answered by its 13th clock; a
+  formal cover reaches 12 and not 13. The watchdog limit, 64, is five times that. (A first version counted all
+  pending clocks; with REQ free in every clock, requests that follow each other without a gap added up past 23:
+  found by the cover, hence the restart at each answer.)
+- 7.6: faults in the same clock count once (they cannot coincide in fault-free operation: TW_DET comes with the
+  predict, the canary a clock later). The substitution needs DEMOTE = 1 as well as DEMOTED, so DEMOTE = 0
+  suspends it (DEMOTED and the count stay until CMD bit 2 or reset) and FCTL = 0 is always the plain chip. FSTAT[10]
+  is DEMOTED; fault event 7 is its level (with the ACK of a predict: the state before that predict; one clock later:
+  including the predict's own TW_DET, not yet its canary). Soft reset clears it like reset.
+
 ### 7.7 gshare randomness, oscillators, strap (step 5)
 
 - GRAND: when the gshare counter is saturated (0 or 3) and training would move it away, it moves only if the
@@ -242,7 +294,7 @@ and reset.
 1. [done] Probe: branch `probe-leaky`, local build clean, pushed for CI.
 2. [done] Trims (7.1), re-verify, local build for the new area baseline.
 3. [done] Registers (7.2), leaky twin (7.3): RTL, model, random generator, tests; local build.
-4. Pulse selector (7.4); canary, checkers, watchdog (7.5); demotion (7.6); formal.
+4. [done] Pulse selector (7.4); canary, checkers, watchdog (7.5); demotion (7.6); formal.
 5. gshare randomness, oscillators, strap (7.7); local build.
 6. Full regression (co-simulation of the 71 programs, random plain and concurrent, formal, cocotb, local build),
    documents (SPEC, verification, area, timing, bring-up experiments), CI, merge to `main`, tag.
@@ -349,3 +401,55 @@ campaign): labels `bpx1-*`, destroy when idle, $12 total cap.
     warnings (were 2,140 / 3), gate-level test 4 passed + 1 skipped, 256 `einvp_1`. The twin's decoder now sits
     on the critical path; with ×4 reference weights it still has 1.3 ns more margin than step 2 (+1.87).
     docs/area.md, which lists every flow setting with its reason, is to be updated at the end of the round.
+- 26 Nov, step 4 (pulse selector 7.4, canary, checkers, watchdog 7.5, demotion 7.6) **(VERIFIED, this session)**.
+  Implemented as in 7.4–7.6 with the differences listed under "As built in step 4". FCTL[7:5] PULSE, [13] DEMOTE,
+  [15] CTEST; FSTAT 4 CANARY, 5–8 checkers, 9 WDOG, 10 DEMOTED; fault events 4–7; flow setting
+  `RSZ_DONT_TOUCH_RX = u_dly`. Model (`clear_counters` split from `clear_stats`, `_fault`, `drive_eff`, DBG one
+  clock after the ACK), random generator (random PULSE, CTEST, DEMOTE; demotion sequences by double errors with
+  SEC-DED / detect-all or by CTEST, ended by CMD bit 2 or DEMOTE = 0), cosim (DBG checked one clock after every
+  ACK), conc_check, coverage (31 new bins, 12 marked "cannot occur without a fault"), test.py (`pulse_settings`,
+  `checkers_watchdog`, `canary_demotion`, RTL; `mosaic_registers` now with CTEST and DEMOTE, also at gate level,
+  PULSE kept 0 there), host helpers, SPEC. Verification:
+  - Timing-exception audit (item 0): no flop takes table read data unless the sequencer is idle; formal assertion
+    proven (see "As built").
+  - cocotb latch cells / flip-flop model / repository top: 8/8 each. `pulse_settings` (latch cells) measured W0–W2
+    pulses of 0.57, 1.14, 1.71, 2.28, 3.42, 4.56, 6.84 ns for settings 1–7 and 10 ns (half the 20 ns test clock)
+    for setting 0 and for BC, G, W3 and the twin at every setting; tables equal the model at every setting.
+    `checkers_watchdog`: each checker and the watchdog set exactly its FSTAT bit (the forced hang also sets the
+    staging checker, whose state it corrupts), its event on DBG, cleared by CMD bit 2.
+  - Random 4 × 50,000 and 10 × 100,000, plain and concurrent: 0 reply (including DBG one clock after the ACK),
+    statistics, state and background mismatches; coverage 100 % of the reachable bins (cross 52/52, other 178/178,
+    12 checker/watchdog bins cannot occur without a fault). Over 10 × 100,000: CANARY set 75 / cleared 74, DEMOTED
+    set 262 / cleared 255, event 4 seen 970, event 7 56,437, canary at executed / refused predicts 14,311 / 950,
+    count steps 307 / 297 / 283, demoted by the fourth fault 262, fourth fault with DEMOTE = 0 17,024, faults from
+    TW_DET 7,746 and from the canary 15,261, suspended 504, resumed 456, predicts while demoted 76,139 (PRED changed
+    by the demotion 16,745), demoted but another predictor selected 49,459.
+  - FCTL = 0: `RG_PLAIN=1` 4 × 50,000 plain and concurrent, 0 mismatches (no FCTL write in the stream).
+  - Mutation check (2 × 20,000 random each, or the named cocotb test): canary compare not gated, demotion on the
+    third fault, demotion to gshare, TW_DET not counted, CMD bit 2 keeps DEMOTED, no suspension by DEMOTE = 0, event
+    4 from the wrong signal, queue checker firing on a full queue, CONF from the undemoted predictor; tap wiring
+    swapped (`pulse_settings`), handshake checker dead (`checkers_watchdog`), W3 on the short pulse
+    (`pulse_settings`): all caught.
+  - Formal prove, nowait, cover: pass, with the new assertions (item 0, `chk == 0`, FSTAT 5–9 stay 0,
+    watchdog count ≤ 12).
+  - Synthesised by block (Yosys, hierarchy kept): chip 57,003 µm² (was 55,991): `bpx_core` own 15,283 (+586:
+    checkers, watchdog, demotion, flags, events), `bpx_canary` 115 (four flops, two delay cells, two XORs; the two
+    PRED/CONF flops were in the core before), `bpx_wseq` 410 (about +310: 12 delay cells, tap mux, and3b, three
+    setting flops).
+  - Local build 1 (canary 2 × `dlygate4sd3_1`, XOR before the shadow flop): 84.36 %, setup −0.39 ns at the slow
+    corner on the CONF canary (CONF itself +2.18). Build 2 (one `dlygate4sd3_1`): −0.34 ns on the CONF canary
+    (CONF itself +1.16; the next real endpoint +0.63). Both clean otherwise (DRC/LVS/antenna 0, gate-level pass).
+  - **Local build 3 (final):** 84.34 % instance utilisation, 61,204 µm² cells (was 59,891 / 82.5 %), timing-repair
+    buffers 4,559, routing DRC 0, Magic DRC 0, LVS 0, antenna 0, **setup +2.06 ns at the slow corner, 0
+    violations** (worst: the CONF canary; the real CONF flop +2.46 on BC table → sum → CONF; PRED +3.54 and its
+    canary +3.06), nominal corner +13.87 ns, hold +0.066 ns, 2,787 max-slew / 14 max-cap warnings, gate-level test
+    4 passed + 4 skipped (RTL-only tests). Final netlist: `u_wseq.u_wp` (and2_1) drives, through 3 inserted
+    buffers, only the row gates of BC (8), G (8), W3 (8), the twin (8) and the snapshot gate; `u_wseq.u_wpx`
+    (and3b_1) drives, through 2 buffers, only the row gates of W0, W1, W2 (8 each). 12 `dlygate4sd3_1` in the
+    delay line and 2 `dlygate4sd1_1` in the canaries, all kept (`RSZ_DONT_TOUCH_RX` applied, logged).
+  - Pulse widths at `u_wpx/X` from the final netlist and parasitics (OpenSTA, latest edges; ns), settings 1–7:
+    tt 0.73, 1.33, 1.98, 2.59, 3.74, 4.93, 7.17; ss 1.49, 2.68, 3.94, 5.12, 7.36, 9.73, 14.10; ff 0.47, 0.90,
+    1.33, 1.76, 2.55, 3.37, 4.93. Standard pulse (setting 0 and `u_wp`) at 30 ns: 14.6 (tt), 14.2 (ss), 14.7 (ff).
+    At the slow corner setting 7 is nearly the standard pulse. The row and gate cells after `u_wpx` reshape these
+    further (not timed: latch gates are not endpoints). No constrained path runs through the delay line or
+    `u_wpx` (OpenSTA: no paths), so `src/bpx.sdc` needed no new exception.

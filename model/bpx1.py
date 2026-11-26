@@ -24,9 +24,16 @@ FEAT_REF, FEAT_SX, FEAT_DYN = 1, 2, 4
 FEAT_MASK = 7
 # mosaic experiments (register FCTL, docs/mosaic.md 7.2); FCTL = 0 is the plain chip
 FCTL_TWIN_EN, FCTL_TWIN_USE, FCTL_CODE_SHIFT, FCTL_RESTORE, FCTL_DBGF = 1, 2, 2, 16, 0x4000
+# write-pulse setting of W0-W2 (FCTL[7:5], no effect on the model: a silicon experiment), demotion, canary self-test
+FCTL_PULSE_SHIFT, FCTL_DEMOTE, FCTL_CTEST = 5, 0x2000, 0x8000
 CODE_NONE, CODE_PARITY, CODE_SECDED, CODE_DETECT = 0, 1, 2, 3
 # sticky fault flags (register FSTAT) and fault events 0-3 on the DBG pins
 TW_ERR, TW_COR, TW_DET, TW_SDC = 1, 2, 4, 8
+# FSTAT 4-10 (docs/mosaic.md 7.5, 7.6): canary, the four invariant checkers, watchdog (sticky); DEMOTED (live).
+# The checkers and the watchdog never fire without a physical fault (proven), so the model never sets them.
+CANARY, CHK_QUEUE, CHK_STAGE, CHK_WSEQ, CHK_HANDSHAKE, WDOG, DEMOTED = 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400
+# fault events on DBG (FCTL[14]): 0-3 twin flags, 4 canary, 5 any checker, 6 watchdog, 7 DEMOTED, 10 default with W3
+EV_CANARY, EV_CHECKER, EV_WDOG, EV_DEMOTED, EV_DEF_W3 = 4, 5, 6, 7, 10
 SPACE_TWIN = 12
 # decode outcomes of one twin read (coverage and tests): see twin_outcome()
 TWO_CLEAN, TWO_COR_DATA, TWO_COR_CHECK, TWO_ABSTAIN, TWO_MISCOR, TWO_SILENT, TWO_MASKED = range(7)
@@ -170,13 +177,20 @@ class Bpx1:
         self.sh = 0                              # speculative history
         self.queue = []                          # in-flight: dicts id, preds(4), pdrv
 
-    def clear_stats(self):
+    def clear_counters(self):
+        """The statistics and error counters only (cosim/conc_check.py accumulates totals with this)."""
         self.n_res = 0
         self.mis = [0, 0, 0, 0]                  # default, bimodal, gshare, tournament
         self.n_err = 0
         self.err_flags = 0
         self.stat_ovf = False
-        self.fstat = 0                           # CMD bit 2 also clears the sticky fault flags
+
+    def clear_stats(self):
+        """CMD bit 2: statistics, error flags, the sticky fault flags, the fault count and DEMOTED."""
+        self.clear_counters()
+        self.fstat = 0                           # sticky FSTAT bits 0-9
+        self.dcnt = 0                            # detected faults, saturating at 3 (docs/mosaic.md 7.6)
+        self.dem = False                         # DEMOTED (FSTAT bit 10)
 
     def reset(self):
         """Pin reset or soft reset: predictor state, statistics and settings."""
@@ -191,6 +205,9 @@ class Bpx1:
         self.last_pdef3 = 0                      # fault event 10
         self.last_twf = 0                        # twin flags of the last executed predict (fault events 0-3)
         self.last_tw = None                      # the twin's read at the last executed predict (None: TWIN_EN = 0)
+        self.last_canary = False                 # the canary fired at the last predict request (fault event 4)
+        self.last_dem0 = self.last_dem1 = False  # DEMOTED at the last executed predict: before it, after its TW_DET
+        self.fault_log = []                      # what each detected fault did (coverage): see _fault()
 
     # ------------------------------------------------------------------ mosaic settings
     @property
@@ -207,6 +224,33 @@ class Bpx1:
 
     def write_fctl(self, value: int):
         self.fctl = value & 0xFFFF
+
+    @property
+    def fstat_reg(self):
+        """FSTAT as the chip reads it: the sticky bits and DEMOTED (bit 10)."""
+        return self.fstat | (DEMOTED if self.dem else 0)
+
+    @property
+    def demoted(self):
+        """The demotion is in effect: DEMOTED and DEMOTE (FCTL[13])."""
+        return self.dem and self.fctl & FCTL_DEMOTE != 0
+
+    def drive_eff(self):
+        """The driving predictor: the tournament replaces the default predictor while demoted."""
+        return DRV_TOURNAMENT if self.demoted and self.drive == DRV_DEFAULT else self.drive
+
+    def _fault(self, source: str):
+        """A detected fault (TW_DET of a predict, canary, a checker, the watchdog): a 2-bit saturating count; the
+        fourth fault with DEMOTE = 1 sets DEMOTED."""
+        if self.dcnt == 3:
+            if self.fctl & FCTL_DEMOTE:
+                self.fault_log.append((source, "set" if not self.dem else "again"))
+                self.dem = True
+            else:
+                self.fault_log.append((source, "blocked"))
+        else:
+            self.fault_log.append((source, self.dcnt))
+            self.dcnt += 1
 
     def twin_outcome(self, raw: int, w3: int):
         """What the decoder makes of a twin word against W3's weight w3 (4-bit pattern) under the present CODE:
@@ -351,17 +395,22 @@ class Bpx1:
     def _do_predict(self, ident, rep):
         L = self._lookup(ident, self.sh, self.psh, twin=True)
         preds = [L.p_def, L.p_bim, L.p_gsh, L.p_trn]
-        pdrv = 0 if self.drive == DRV_NOT_TAKEN else preds[self.drive]
+        drv = self.drive_eff()                     # demotion: the tournament instead of the default predictor
+        pdrv = 0 if drv >= DRV_NOT_TAKEN else preds[drv]
         self.queue.append(dict(id=ident & ((1 << self.cfg.W) - 1), preds=preds, pdrv=pdrv))
         self.last_preds = preds                    # on the pins: DBG0, PBIM, PGSH, DBG1 after reset
         self.last_pdef3 = L.p_def3
         self.last_tw = L.tw
         self.last_twf = L.tw["flags"] if L.tw else 0
         self.fstat |= self.last_twf
+        self.last_dem0 = self.dem
+        if self.last_twf & TW_DET:                 # a detected (uncorrected) twin error counts towards demotion
+            self._fault("twin")
+        self.last_dem1 = self.dem
         self.sh = ((self.sh << 1) | pdrv) & self._hmask()
         self.psh = ((self.psh << 1) | self.pbit(ident)) & self._pmask()
         rep.pred = pdrv
-        rep.conf = 0 if self.drive >= DRV_NOT_TAKEN else L.conf[self.drive]     # CONF qualifies PRED
+        rep.conf = 0 if drv >= DRV_NOT_TAKEN else L.conf[drv]     # CONF qualifies PRED
 
     def _do_resolve(self, taken, rep):
         e = self.queue.pop(0)
@@ -408,6 +457,13 @@ class Bpx1:
             else:                                 # predict, then resolve the oldest (possibly this very branch)
                 self._do_predict(ident, rep)
                 self._do_resolve(taken, rep)
+        self.last_canary = False
+        if op != OP_SPECIAL and self.fctl & FCTL_CTEST:
+            # canary self-test: the shadow samples of PRED and CONF are inverted, so the canary fires in the clock
+            # after every answered predict request (executed or refused)
+            self.last_canary = True
+            self.fstat |= CANARY
+            self._fault("canary")
         return rep
 
     # convenience wrappers
@@ -432,19 +488,26 @@ class Bpx1:
         self.drive, self.frozen, self.feat = value & 7, bool(value & 8), (value >> 12) & FEAT_MASK
         self.dsel = [(value >> 4) & 15, (value >> 8) & 15]
 
-    def dbg_event(self, k: int):
-        """Value of DBG event k as the pins show it together with the ACK of an accepted predict: the fault events
-        (FCTL[14] = 1: 0-3 the twin flags of that predict, 10 its default prediction with W3, the others 0), or the
-        standard events 10-13 (the four predictions); None for a standard event the model does not track."""
+    def dbg_event(self, k: int, post: bool = False):
+        """Value of DBG event k as the pins show it together with the ACK of an accepted predict (post = False) or
+        one clock later (post = True).  Fault events (FCTL[14] = 1): 0-3 the twin flags of that predict (pulses with
+        the ACK); 4 the canary (a pulse one clock after the ACK); 5 and 6, checker and watchdog, never fire here;
+        7 DEMOTED (a level: with the ACK as it was before this predict, one clock later including the predict's own
+        TW_DET, not yet its canary); 10 its default prediction with W3 (a level); the others 0.  Standard events:
+        10-13 the four predictions (levels); None for a standard event the model does not track."""
         if self.fctl & FCTL_DBGF:
             if k < 4:
-                return (self.last_twf >> k) & 1
-            return self.last_pdef3 if k == 10 else 0
+                return 0 if post else (self.last_twf >> k) & 1
+            if k == EV_CANARY:
+                return 1 if (post and self.last_canary) else 0
+            if k == EV_DEMOTED:
+                return 1 if (self.last_dem1 if post else self.last_dem0) else 0
+            return self.last_pdef3 if k == EV_DEF_W3 else 0
         return self.last_preds[k - 10] if 10 <= k <= 13 else None
 
-    def dbg_pins(self):
-        """(DBG0, DBG1) with the ACK of the last accepted predict."""
-        return self.dbg_event(self.dsel[0]), self.dbg_event(self.dsel[1])
+    def dbg_pins(self, post: bool = False):
+        """(DBG0, DBG1) with the ACK of the last accepted predict, or one clock later (post)."""
+        return self.dbg_event(self.dsel[0], post), self.dbg_event(self.dsel[1], post)
 
     # ------------------------------------------------------------------ observation
     def stats(self):
@@ -455,7 +518,8 @@ class Bpx1:
         """Every bit of predictor state (FR-10), in a canonical form the testbench compares with the chip."""
         return dict(bim=list(self.bim), cho=list(self.cho), gsh=list(self.gsh), weights=[list(t) for t in self.wt],
                     theta=self.theta, tc=self.tc, ch=self.ch, sh=self.sh, pch=self.pch, psh=self.psh, queue=[dict(q) for q in self.queue],
-                    drive=self.drive, frozen=self.frozen, feat=self.feat, twin=list(self.tw), fctl=self.fctl, fstat=self.fstat)
+                    drive=self.drive, frozen=self.frozen, feat=self.feat, twin=list(self.tw), fctl=self.fctl, fstat=self.fstat_reg,
+                    dcnt=self.dcnt)
 
     def raw(self, space: int, addr: int) -> int:
         """The word the control port's raw access reads at (space, addr) (docs/SPEC.md section 4)."""

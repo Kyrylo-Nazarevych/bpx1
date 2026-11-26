@@ -44,8 +44,8 @@ module bpx_core #(
     input  wire [W-1:0] id_d,      // ID after one flop (stable whenever a request is pending)
     input  wire [1:0]   op_d,      // OP after one flop
     output reg          ack,
-    output reg          pred,
-    output reg          conf,
+    output wire         pred,      // flops in bpx_canary (each with its canary)
+    output wire         conf,
     output reg          full,
     output reg          ready,
     output reg  [1:0]   dbg,
@@ -69,9 +69,16 @@ module bpx_core #(
   reg        srst;                  // soft reset, one cycle
   wire       irst = rst | srst;
   // mosaic (docs/mosaic.md 7.2): FCTL switches the experiments (0 = the plain chip); FSTAT holds sticky fault flags
-  reg  [15:0] fctl;                 // [0] TWIN_EN [1] TWIN_USE [3:2] CODE [4] RESTORE [14] DBGF; the rest storage only
-  reg  [3:0]  fstat;                // [0] TW_ERR [1] TW_COR [2] TW_DET [3] TW_SDC
+  reg  [15:0] fctl;                 // [0] TWIN_EN [1] TWIN_USE [3:2] CODE [4] RESTORE [7:5] PULSE [13] DEMOTE [14] DBGF
+                                    // [15] CTEST; [12:8] storage only (step 5)
+  reg  [9:0]  fstat;                // sticky: [0] TW_ERR [1] TW_COR [2] TW_DET [3] TW_SDC [4] CANARY [8:5] checkers [9] WDOG
   reg         lpw;                  // fault event 10: the default prediction of the last predict computed with W3
+  // dependability (docs/mosaic.md 7.5, 7.6): canary, invariant checkers, hang watchdog, demotion
+  reg         cap_q;                // PRED and CONF were loaded at the last edge (a predict request was answered)
+  reg         ack_q, ackt_q, hs_q;  // handshake checker: ACK, its toggle condition and "ready, no reset" one clock ago
+  reg  [5:0]  wd_cnt;               // watchdog: clocks a request has been pending without a control-port write
+  reg  [1:0]  dcnt;                 // detected faults, saturating at 3
+  reg         dem;                  // DEMOTED: the fourth detected fault came with DEMOTE = 1 (FSTAT[10], live)
   reg        init_pend, clrp_pend, snap_pend, snap_q, sclr_pend, sclr_q;
 
   // ---------------------------------------------------------------- state
@@ -106,8 +113,9 @@ module bpx_core #(
   wire          h_pdrv  = head[W+4];
 
   // ---------------------------------------------------------------- write sequencer and datapath
-  wire wcap, wact, wpulse, wbusy, wreq;
-  bpx_wseq u_wseq (.clk(clk), .rst(rst), .req(wreq), .wcap(wcap), .wact(wact), .wpulse(wpulse), .busy(wbusy));
+  wire wcap, wact, wpulse, wpulse_x, wbusy, wreq, wbad;
+  bpx_wseq u_wseq (.clk(clk), .rst(rst), .req(wreq), .psel_in(fctl[7:5]), .wcap(wcap), .wact(wact), .wpulse(wpulse),
+                   .wpulse_x(wpulse_x), .busy(wbusy), .bad(wbad));
 
   wire [1:0]    rsel;
   wire          p_def, p_bim, p_gsh, p_trn;
@@ -122,7 +130,7 @@ module bpx_core #(
 
   bpx_pred #(.W(W), .LGB(LGB), .LGG(LGG), .HG(HG), .NT(NT), .LGT(LGT), .CB(CB), .LV(LV), .HL(HL), .PL(PL), .UBW(UBW), .UGW(UGW), .UTW(UTW), .SK(SK), .THETA(THETA), .SB(SB)) u_pred (
       .clk(clk), .rst(irst), .feat(feat), .tctl(fctl[4:0]), .tw_flags(tw_flags), .p_def3(p_def3),
-      .wcap(wcap), .wact(wact), .wpulse(wpulse),
+      .wcap(wcap), .wact(wact), .wpulse(wpulse), .wpulse_x(wpulse_x),
       .rsel(rsel), .id_p(id_d), .hist_p(sh), .path_p(psh), .id_c(h_id), .hist_c(ch), .path_c(pch),
       .dbg_tab(dspace), .dbg_addr(da), .dbg_rdata(t_rdata),
       .p_def(p_def), .p_bim(p_bim), .p_gsh(p_gsh), .p_trn(p_trn), .conf(p_conf), .look(look),
@@ -178,9 +186,35 @@ module bpx_core #(
   wire snap_exec = snap_pend & ~wbusy & ~r_exec & ~clr_exec & ~dwr_exec;
   assign wreq    = clr_exec | train | dwr_tab | snap_exec;
 
-  // the prediction returned to the host
+  // the prediction returned to the host; demotion (docs/mosaic.md 7.6): once DEMOTED, with DEMOTE = 1, the
+  // tournament drives wherever CTRL selects the default predictor
   wire [3:0] preds = {p_trn, p_gsh, p_bim, p_def};
-  wire       pdrv  = drive[2] ? 1'b0 : preds[drive[1:0]];
+  wire [2:0] drv_e = (dem && fctl[13] && drive == 3'd0) ? 3'd3 : drive;
+  wire       pdrv  = drv_e[2] ? 1'b0 : preds[drv_e[1:0]];
+
+  // PRED and CONF flops with their canaries (docs/mosaic.md 7.5): a second flop samples the same D through a delay
+  // chain; CTEST (FCTL[15]) inverts that sample.  Compared in the clock after the two were loaded.
+  wire pred_n = irst ? 1'b0 : p_exec ? pdrv : p_refuse ? 1'b0 : pred;
+  wire conf_n = irst ? 1'b0 : p_exec ? (~drv_e[2] & p_conf[drv_e[1:0]]) : p_refuse ? 1'b0 : conf;   // CONF qualifies PRED
+  wire [1:0] can_s;
+  bpx_canary u_can (.clk(clk), .d({conf_n, pred_n}), .inv(fctl[15]), .q({conf, pred}), .s(can_s));
+  wire can_hit = cap_q & ((pred ^ can_s[0]) | (conf ^ can_s[1]));
+
+  // invariant checkers (each one of the proven properties below, as hardware; FSTAT[8:5]) and the hang watchdog
+  wire [3:0] chk;
+  assign chk[0] = (qcnt > 3'd4) | (full != (qcnt == 3'd4));                  // queue count in range, FULL consistent
+  assign chk[1] = ((stg_v | rpend) & q_empty) | (rf_done & ~seen);           // staging / resolve state
+  assign chk[2] = wbad | (wreq & wbusy);                                      // write sequencer: one state, no lost request
+  assign chk[3] = hs_q & ((ack ^ ack_q) ^ ackt_q);                            // ACK toggles exactly when a request is answered
+  wire       chk_any = |chk;
+  // watchdog: a request pending for 64 clocks without being answered and with no control-port write in between (a
+  // write may legitimately hold requests: clear predictors).  The count restarts with every answer, so requests that
+  // follow each other without a gap are not added up.  Proven bound below: the count never exceeds F_WD; SPI words
+  // are at least 128 clocks apart, so a real hang still reaches 64.
+  wire       wd_on  = pending & ~reg_we & ~ack_t;
+  wire       wd_hit = wd_on & (wd_cnt == 6'd63);
+  // demotion: a 2-bit saturating count of detected faults (TW_DET of a predict, canary, any checker, watchdog)
+  wire       fault  = (tw_flags[2] & p_exec) | can_hit | chk_any | wd_hit;
 
   // small registers visible through the raw access port (space 7): histories, threshold and its adaptation counter
   reg [11:0] misc;
@@ -233,7 +267,7 @@ module bpx_core #(
       5'h0f:   reg_rdata = {dinc, 1'b0, dwm, dspace, 1'b0, da};
       5'h10:   reg_rdata = {4'd0, dq};
       5'h11:   reg_rdata = fctl;
-      5'h12:   reg_rdata = {12'd0, fstat};
+      5'h12:   reg_rdata = {5'd0, dem, fstat};
       default: reg_rdata = 16'd0;
     endcase
   end
@@ -249,16 +283,19 @@ module bpx_core #(
   wire [3:0]  lp_n = p_exec ? preds : lp;        // so that the DBG pins change together with ACK, like PRED
   wire [15:0] evt = {do_stage, reg_we | reg_re, lp_n[3], lp_n[2], lp_n[1], lp_n[0], q_empty, stg_v, wact,
                      p_refuse | r_empty | (seen & ~pending & ready), fl_exec, r_misp, r_exec, p_exec, pending & ~seen, 1'b0};
-  // fault events (FCTL[14]): 0-3 the twin flags of the predict being acknowledged, 10 its default prediction with W3
+  // fault events (FCTL[14]): 0-3 the twin flags of the predict being acknowledged, 4 canary (in the clock after the
+  // acknowledge), 5 any checker, 6 watchdog, 7 DEMOTED (level), 10 the default prediction with W3 of the last predict
   wire        lpw_n = p_exec ? p_def3 : lpw;
   wire [3:0]  tw_ev = tw_flags & {4{p_exec}};
-  wire [15:0] fevt  = {5'd0, lpw_n, 6'd0, tw_ev};
+  wire [15:0] fevt  = {5'd0, lpw_n, 2'd0, dem, wd_hit, chk_any, can_hit, tw_ev};
 
   wire [2:0] qcnt_n = (fl_exec | r_misp) ? 3'd0 : qcnt + {2'b00, p_exec} - {2'b00, r_exec};
   wire       err_ev = p_refuse | r_empty | (seen & ~pending & ready);
 
   always @(posedge clk) begin
-    srst <= 1'b0;
+    srst   <= 1'b0;
+    ack_q  <= ack;
+    ackt_q <= ack_t;
     if (irst) begin
       drive     <= 3'd0;
       freeze    <= 1'b0;
@@ -266,8 +303,13 @@ module bpx_core #(
       dsel1     <= 4'd13;                           // DBG1: last prediction of the tournament
       feat      <= FEAT;
       fctl      <= 16'd0;
-      fstat     <= 4'd0;
+      fstat     <= 10'd0;
       lpw       <= 1'b0;
+      cap_q     <= 1'b0;
+      hs_q      <= 1'b0;
+      wd_cnt    <= 6'd0;
+      dcnt      <= 2'd0;
+      dem       <= 1'b0;
       init_pend <= 1'b1;
       clrp_pend <= 1'b0;
       snap_pend <= 1'b0;
@@ -303,8 +345,6 @@ module bpx_core #(
       drd_pend  <= 1'b0;
       dwr_pend  <= 1'b0;
       ack       <= req_s;
-      pred      <= 1'b0;
-      conf      <= 1'b0;
       full      <= 1'b0;
       ready     <= 1'b0;
       dbg       <= 2'b00;
@@ -323,16 +363,25 @@ module bpx_core #(
         if (!init_pend && !wbusy) ready <= 1'b1;
       end
 
-      // -------- predict
+      // -------- dependability: sticky flags (the twin's flags of an executed predict, 0 unless TWIN_EN; canary;
+      //          checkers; watchdog), demotion count, watchdog count.  CMD bit 2 (below) clears them.
+      fstat  <= fstat | {wd_hit, chk, can_hit, tw_flags & {4{p_exec}}};
+      cap_q  <= p_exec | p_refuse;
+      hs_q   <= ready;
+      wd_cnt <= wd_on ? wd_cnt + 6'd1 : 6'd0;       // wraps after a hit: WDOG fires again every 64 clocks of a hang
+      if (fault) begin
+        if (dcnt == 2'd3) begin
+          if (fctl[13]) dem <= 1'b1;                // the fourth detected fault, with DEMOTE
+        end else dcnt <= dcnt + 2'd1;
+      end
+
+      // -------- predict (PRED and CONF: pred_n, conf_n above)
       if (p_exec) begin
         qmem[qhead+qcnt[1:0]] <= {pdrv, preds, id_d};
         sh   <= {sh[HL-2:0], pdrv};
         psh  <= {psh[PL-2:0], pb_p};
-        pred <= pdrv;
-        conf <= ~drive[2] & p_conf[drive[1:0]];     // CONF qualifies PRED: the confidence of the driving predictor
         lp   <= preds;
         lpw  <= p_def3;
-        fstat <= fstat | tw_flags;                  // the twin's flags of this lookup (0 unless TWIN_EN)
         if (q_empty) begin                          // the predict lookup is the commit lookup
           stg   <= look;
           stg_v <= 1'b1;
@@ -342,10 +391,6 @@ module bpx_core #(
           rtk   <= tk_in;
         end
         rf_done <= 1'b0;
-      end
-      if (p_refuse) begin
-        pred <= 1'b0;
-        conf <= 1'b0;
       end
       if (r_first) rf_done <= 1'b1;
       if (do_stage) begin
@@ -455,7 +500,9 @@ module bpx_core #(
           mis3    <= {STATW{1'b0}};
           err_cnt <= 8'd0;
           eflags  <= 4'd0;
-          fstat   <= 4'd0;
+          fstat   <= 10'd0;
+          dcnt    <= 2'd0;
+          dem     <= 1'b0;
         end
         if (reg_wdata[3] | reg_wdata[4]) snap_pend <= 1'b1;
         if (reg_wdata[4]) sclr_pend <= 1'b1;
@@ -485,6 +532,10 @@ module bpx_core #(
   // No assumption is made about the host or the control port: every input is free in every cycle, so each
   // assertion holds under any protocol misuse and any timing (IR-01, IR-09).  Only reset is assumed at the start.
   localparam F_N = `FV_QUIET;       // RR-03: cycles of quiet inputs after which the chip must be idle and ready
+`ifndef FV_WD
+`define FV_WD 12
+`endif
+  localparam F_WD = `FV_WD;         // bound of the watchdog count (see the assertion); 12 is reached (cover), 13 not
   reg f_past = 1'b0;
   reg f_rs   = 1'b0;                // a reset has been applied: the registers are defined
   always @(posedge clk) begin
@@ -527,6 +578,21 @@ module bpx_core #(
     assert (!(nop_exec && (p_exec || r_exec)));
     assert (!(p_refuse && (p_exec || r_exec)));
     assert (!(r_empty && (p_exec || r_exec)));
+    // ---- the timing exception of src/bpx.sdc (the twin's tri-state enable arc): no flop takes table read data
+    //      while the write sequencer is busy, so in particular never in a write-pulse cycle (wact).  Every capture
+    //      of read data is enabled by one of these three: p_exec (PRED, CONF, the queue entry, the speculative
+    //      history, the last predictions and their DBG events, the twin flags in FSTAT and the fault events, the
+    //      staging register of a predict with an empty queue), do_stage (staging), drd_exec with a table space
+    //      (raw read data).  The canary flops sample PRED/CONF's D, which is a table value only under p_exec.
+    assert (!((p_exec || do_stage || (drd_exec && d_tab)) && wbusy));
+    if (wbusy && !irst) assert (pred_n == (p_refuse ? 1'b0 : pred) && conf_n == (p_refuse ? 1'b0 : conf));
+    // ---- the hardware checkers and the watchdog cannot fire without a physical fault (docs/mosaic.md 7.5)
+    assert (chk == 4'd0);
+    assert (fstat[8:5] == 4'd0);
+    assert (!fstat[9]);
+    //      liveness bound: a request pending with no control-port write is answered within F_WD + 1 clocks, so
+    //      the watchdog count (64) is never reached
+    assert (wd_cnt <= F_WD);
     // ---- FR-04: the speculative history is the committed history followed by the directions the host follows
     //      for the unresolved branches; with nothing in flight the two are equal
     case (qcnt)
@@ -647,5 +713,51 @@ module bpx_shadow #(
     end
   endgenerate
   wire _unused = &{1'b0, clk, wact};
+`endif
+endmodule
+
+// bpx_canary - output flops with canaries (docs/mosaic.md 7.5).  For each bit: the flop u_q takes d; a second flop
+// u_s, clocked by the same edge, takes d through ND delay cells (sky130_fd_sc_hd__dlygate4sd1_1, about 0.24 ns
+// each typical, 0.45 ns at the slow corner; ND = 1).  When the timing margin of d is used up, the shadow samples
+// the old value while the real flop still gets the new one, so the two differ.  The self-test inverts the shadow's
+// sample with an XOR on its output (inv = CTEST), off the timed path.  All cells are instantiated by name, so that
+// the canary taps exactly the flop's D net.  Behavioural model (simulation, proofs): no delay.
+// (Built first with 2 and then 1 dlygate4sd3_1 and the XOR before the shadow flop: the CONF canary missed setup at
+// the slow corner by 0.39 and 0.34 ns; the real CONF flop's slack moved between builds, +2.18 and +1.16 ns.)
+module bpx_canary #(
+    parameter N  = 2,
+    /* verilator lint_off UNUSEDPARAM */
+    parameter ND = 1               // delay cells (structural model only)
+    /* verilator lint_on UNUSEDPARAM */
+) (
+    input  wire         clk,
+    input  wire [N-1:0] d,
+    input  wire         inv,
+    output wire [N-1:0] q,
+    output wire [N-1:0] s
+);
+`ifdef BPX_BEHAV
+  reg [N-1:0] rq, rs;
+  always @(posedge clk) begin
+    rq <= d;
+    rs <= d;
+  end
+  assign q = rq;
+  assign s = rs ^ {N{inv}};
+`else
+  genvar i, j;
+  generate
+    for (i = 0; i < N; i = i + 1) begin : g_b
+      wire [ND:0] c;
+      wire        sq;
+      assign c[0] = d[i];
+      for (j = 0; j < ND; j = j + 1) begin : g_d
+        (* keep *) sky130_fd_sc_hd__dlygate4sd1_1 u_dly (.A(c[j]), .X(c[j+1]));
+      end
+      (* keep *) sky130_fd_sc_hd__dfxtp_1 u_q (.CLK(clk), .D(d[i]), .Q(q[i]));
+      (* keep *) sky130_fd_sc_hd__dfxtp_1 u_s (.CLK(clk), .D(c[ND]), .Q(sq));
+      (* keep *) sky130_fd_sc_hd__xor2_1 u_inv (.A(sq), .B(inv), .X(s[i]));
+    end
+  endgenerate
 `endif
 endmodule

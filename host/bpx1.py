@@ -20,9 +20,15 @@ REG_FCTL, REG_FSTAT = 0x11, 0x12
 CMD_SOFT_RESET, CMD_CLEAR_PRED, CMD_CLEAR_STATS, CMD_SNAPSHOT, CMD_SNAPSHOT_CLEAR = 1, 2, 4, 8, 16
 # mosaic experiments (docs/mosaic.md 7.2): FCTL bits; FCTL = 0 is the plain chip
 FCTL_TWIN_EN, FCTL_TWIN_USE, FCTL_RESTORE, FCTL_DBGF = 1, 2, 16, 0x4000
+FCTL_PULSE_SHIFT, FCTL_DEMOTE, FCTL_CTEST = 5, 0x2000, 0x8000
 CODE_NONE, CODE_PARITY, CODE_SECDED, CODE_DETECT = 0, 1, 2, 3
-# FSTAT (sticky, cleared by CMD_CLEAR_STATS and reset) and fault events 0-3 on DBG with FCTL_DBGF
+# FSTAT (sticky, cleared by CMD_CLEAR_STATS and reset; DEMOTED is live) and fault events on DBG with FCTL_DBGF:
+# 0-3 twin flags, 4 canary (one clock after the ACK), 5 any checker, 6 watchdog, 7 DEMOTED, 10 default with W3
 TW_ERR, TW_COR, TW_DET, TW_SDC = 1, 2, 4, 8
+CANARY, CHK_QUEUE, CHK_STAGE, CHK_WSEQ, CHK_HANDSHAKE, WDOG, DEMOTED = 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400
+# write-pulse setting of W0-W2 (FCTL[7:5]): 0 standard (half a clock); 1-7 the tap after 1, 2, 3, 4, 6, 8, 12
+# delay cells, typically about 0.6 ns each (docs/mosaic.md 7.4 has the widths per corner)
+PULSE_CELLS = (0, 1, 2, 3, 4, 6, 8, 12)
 SPACE_BC, SPACE_G, SPACE_SMALL, SPACE_W0, SPACE_W3, SPACE_TWIN = 0, 1, 7, 8, 11, 12
 DRIVE = ("default", "bimodal", "gshare", "tournament", "static not-taken")
 
@@ -177,18 +183,23 @@ class Bpx1Host:
             self.idle()
 
     # ---------------------------------------------------------------- mosaic (docs/mosaic.md 7.2, 7.3)
-    def set_fctl(self, twin=False, use=False, code=CODE_NONE, restore=False, dbgf=False, other=0):
+    def set_fctl(self, twin=False, use=False, code=CODE_NONE, restore=False, dbgf=False, pulse=0, demote=False,
+                 ctest=False, other=0):
         """twin: let the leaky twin's data through (compare, flags, events); use: the default predictor sums the
         twin's weight instead of W3's; code: protection of the twin (0 none, 1 parity -> abstain, 2 SEC-DED,
         3 detect all -> abstain); restore: restore-on-use; dbgf: the DBG selections index the fault events;
-        other: the remaining FCTL bits as a word (their functions come with later steps)."""
-        v = (other & ~0x401F) | (FCTL_TWIN_EN if twin else 0) | (FCTL_TWIN_USE if use else 0) | ((code & 3) << 2)
-        v |= (FCTL_RESTORE if restore else 0) | (FCTL_DBGF if dbgf else 0)
+        pulse: write-pulse setting of W0-W2 (0 standard, 1-7 shorter: PULSE_CELLS); demote: after four detected
+        faults the tournament drives instead of the default predictor; ctest: canary self-test (fires at every
+        predict); other: the remaining FCTL bits [12:8] as a word (their functions come with step 5)."""
+        v = (other & 0x1F00) | (FCTL_TWIN_EN if twin else 0) | (FCTL_TWIN_USE if use else 0) | ((code & 3) << 2)
+        v |= (FCTL_RESTORE if restore else 0) | (FCTL_DBGF if dbgf else 0) | ((pulse & 7) << FCTL_PULSE_SHIFT)
+        v |= (FCTL_DEMOTE if demote else 0) | (FCTL_CTEST if ctest else 0)
         self.write(REG_FCTL, v)
         return v
 
     def fstat(self, clear=False):
-        """Sticky fault flags {TW_SDC, TW_DET, TW_COR, TW_ERR}; clear=True clears them with the statistics."""
+        """Fault flags: TW_ERR, TW_COR, TW_DET, TW_SDC, CANARY, the four checkers, WDOG (sticky) and DEMOTED (live);
+        clear=True clears them, the fault count and DEMOTED, with the statistics (CMD bit 2)."""
         v = self.read(REG_FSTAT)[0]
         if clear:
             self.command(CMD_CLEAR_STATS)

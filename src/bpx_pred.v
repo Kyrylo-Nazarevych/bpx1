@@ -32,6 +32,10 @@
 // back (corrected when SEC-DED corrected it).  The twin is written with the standard pulse whenever W3 is written
 // by training (the code word of the new weight), by clear (the code word of W3's initial value), by a raw write
 // to space 12, and by restore-on-use.
+//
+// Write pulses (docs/mosaic.md 7.4): the weight tables 0..NT-2 (W0-W2) take wpulse_x, the output of the pulse
+// selector's own gate (standard width with FCTL[7:5] = 0, shorter otherwise); BC, G, W3 and the twin take wpulse,
+// the standard pulse, structurally.
 `default_nettype none
 
 module bpx_pred #(
@@ -61,7 +65,8 @@ module bpx_pred #(
     // write sequencer (shared by all tables)
     input  wire               wcap,
     input  wire               wact,
-    input  wire               wpulse,
+    input  wire               wpulse,    // standard pulse: BC, G, W3 and the twin
+    input  wire               wpulse_x,  // pulse of W0..W(NT-2): standard or shortened (FCTL[7:5], docs/mosaic.md 7.4)
     // lookup
     input  wire [1:0]         rsel,
     input  wire [W-1:0]       id_p,
@@ -247,8 +252,15 @@ module bpx_pred #(
 
       wire          dw_t = dw & (dbg_tab == 4'd8 + i);
       wire [CB-1:0] r_t;
+      // the last table (W3, the twin's golden reference) always takes the standard pulse; the others the selected one
+      wire          wp_t;
+      if (i < NT - 1) begin : g_wpx
+        assign wp_t = wpulse_x;
+      end else begin : g_wps
+        assign wp_t = wpulse;
+      end
       bpx_ltab #(.AW(LGT), .RW(LGT > 4 ? 3 : 2), .EW0(CB), .EW1(0), .INIT(((i & 1) == (NT & 1)) ? {CB{1'b0}} : {CB{1'b1}})) u_t (
-          .clk(clk), .wcap(wcap), .wact(wact), .wpulse(wpulse), .clr(clr),
+          .clk(clk), .wcap(wcap), .wact(wact), .wpulse(wp_t), .clr(clr),
           .we0((train & learn) | (dw_t & dbg_we0)), .we1(1'b0),
           .waddr(dw ? dbg_addr[LGT-1:0] : ix_c), .wdata(dw ? dbg_wdata[CB-1:0] : w_n),
           .raddr(r_dbg ? dbg_addr[LGT-1:0] : r_commit ? ix_c : ix_p), .rdata(r_t));

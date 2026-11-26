@@ -21,6 +21,9 @@
   "PNR_SDC_FILE": "dir::bpx.sdc",
   "SIGNOFF_SDC_FILE": "dir::bpx.sdc",
 
+  "//": "The delay cells of the write-pulse selector and of the canaries (instances u_dly, docs/mosaic.md 7.4, 7.5) are their delay: the resizer may not resize or remove them.",
+  "RSZ_DONT_TOUCH_RX": "u_dly",
+
   "RUN_LINTER": 1,
   "LINTER_INCLUDE_PDK_MODELS": 1,
 
