@@ -24,17 +24,17 @@ module bpx_core #(
     parameter HG  = 4,
     parameter NT  = 4,
     parameter LGT = 5,
-    parameter CB  = 5,
+    parameter CB  = 4,
     parameter [NT*6-1:0] LV = {6'd20, 6'd9, 6'd8, 6'd0},
     parameter HL  = 21,
-    parameter PL  = 16,
+    parameter PL  = 8,
     parameter UBW = 2,
-    parameter UGW = 4,
-    parameter UTW = 4,
+    parameter UGW = 3,
+    parameter UTW = 3,
     parameter SK  = 0,
-    parameter THETA = 12,
-    parameter SB  = 9,
-    parameter FEAT = 4'b0111,      // features of the default predictor enabled after reset (CTRL[15:12])
+    parameter THETA = 10,
+    parameter SB  = 8,
+    parameter FEAT = 3'b111,       // features of the default predictor enabled after reset (CTRL[14:12]; CTRL[15] reads 0)
     parameter STATW = 16           // statistics counter width (16..32)
 ) (
     input  wire         clk,
@@ -65,7 +65,7 @@ module bpx_core #(
   reg  [2:0] drive;                 // 0 default, 1 bimodal, 2 gshare, 3 tournament, 4..7 static not-taken
   reg        freeze;
   reg  [3:0] dsel0, dsel1;
-  reg  [3:0] feat;                  // default predictor: {binarised inference, adaptive threshold, negation by history, reference inputs}
+  reg  [2:0] feat;                  // default predictor: {adaptive threshold, negation by history, reference inputs}
   reg        srst;                  // soft reset, one cycle
   wire       irst = rst | srst;
   reg        init_pend, clrp_pend, snap_pend, snap_q, sclr_pend, sclr_q;
@@ -210,7 +210,7 @@ module bpx_core #(
   always @* begin
     case (reg_addr[4:0])
       5'h00:   reg_rdata = 16'hB101;
-      5'h01:   reg_rdata = {feat, dsel1, dsel0, freeze, drive};
+      5'h01:   reg_rdata = {1'b0, feat, dsel1, dsel0, freeze, drive};
       5'h03:   reg_rdata = {4'd0, eflags, drd_pend | dwr_pend, wbusy, pending, stg_v, ready, qcnt};
       5'h04:   reg_rdata = {8'd0, err_cnt};
       5'h05:   reg_rdata = sn0[15:0];
@@ -417,7 +417,7 @@ module bpx_core #(
         freeze <= reg_wdata[3];
         dsel0  <= reg_wdata[7:4];
         dsel1  <= reg_wdata[11:8];
-        feat   <= reg_wdata[15:12];
+        feat   <= reg_wdata[14:12];         // CTRL[15] (binarised inference, removed) is ignored
       end
       if (w_cmd) begin
         if (reg_wdata[0]) srst <= 1'b1;

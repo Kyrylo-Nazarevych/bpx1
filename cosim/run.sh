@@ -5,7 +5,7 @@
 # Per program: the CPU contract with each predictor driving (0 default, 1 bimodal, 2 gshare, 3 tournament,
 # 4 static not-taken through the chip), and a one-in-flight trace replay.  The default-driven run and the trace
 # replay log every request and reply; model/replay.py then checks them against the golden model.
-# BPX_FEAT=<0..15> sets the features of the default predictor (CTRL[15:12]; default 7 as after reset; 0 = safe mode).
+# BPX_FEAT=<0..7> sets the features of the default predictor (CTRL[14:12]; default 7 as after reset; 0 = safe mode).
 # Results: out/cosim/<program>.{d0..d4,seq}.txt, *.model.txt; summary by cosim/report.py.
 source ~/ttsetup/env.sh 2>/dev/null
 set -e

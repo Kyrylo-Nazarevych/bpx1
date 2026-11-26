@@ -216,6 +216,56 @@ and reset.
 6. Full regression (co-simulation of the 71 programs, random plain and concurrent, formal, cocotb, local build),
    documents (SPEC, verification, area, timing, bring-up experiments), CI, merge to `main`, tag.
 
+7. Pre-silicon fault-injection campaign (owners' request of 26 Nov, once the design is stable; on Vast, economical):
+   random bit flips in each predictor's tables at several rates on all 71 programs, and a decay model of the leaky
+   table under each protection mode. Result: predicted extra mispredictions per fault, per predictor and per mode,
+   as the baseline for the silicon measurements. Planned in the trace simulator (`explore/bpsim`, which equals the
+   RTL), with a spot check on the RTL by raw-write injection.
+
+Vast may be used whenever the PC is the bottleneck (co-simulation, sweeps, random regression, formal, the
+campaign): labels `bpx1-*`, destroy when idle, $12 total cap.
+
 ## 9. Progress log
 
 - 26 Nov: probe built locally, clean (section 5); pushed as `b428b21`. CI result: pending.
+- 26 Nov, step 2 (trims) **(VERIFIED, this session)**. Sweep (`explore/bpsim` W=8, built with `-Wshadow`; its one
+  warning, the local `pr` in `GehlRP::train`, is old and harmless: the member is used as `this->pr`), speedup / CPU
+  accuracy, tuning (51) and held-out (18) programs:
+
+  | Candidate | Tuning | Held-out |
+  | --- | --- | --- |
+  | baseline cb=5 pp=16 θ12 (2,4,4) | 1.13383 / 90.66 | 1.14200 / 93.60 |
+  | cb=4 pp=16 θ12 (2,4,4), for reference | 1.13260 / 90.27 | 1.14071 / 93.23 |
+  | **θ10 (2,3,3), chosen** | **1.13232 / 90.18** | **1.14025 / 93.05** |
+  | θ6 (2,3,3) | 1.13232 / 90.18 | 1.14010 / 93.03 |
+  | θ12 (2,3,3) | 1.13231 / 90.18 | 1.14025 / 93.03 |
+  | θ8 (2,3,3) | 1.13231 / 90.18 | 1.14019 / 93.03 |
+  | θ12 (2,4,4) | 1.13228 / 90.20 | 1.14015 / 93.02 |
+  | θ6 (2,4,4) | 1.13228 / 90.19 | 1.14006 / 93.00 |
+  | θ8 (2,4,4) | 1.13228 / 90.20 | 1.14012 / 93.02 |
+  | θ10 (2,4,4) | 1.13228 / 90.19 | 1.14021 / 93.03 |
+  | θ8 (1,3,2) | 1.13208 / 90.09 | 1.14007 / 93.00 |
+  | θ12 (1,3,2) | 1.13208 / 90.08 | 1.13996 / 92.99 |
+  | θ10 (1,3,2) | 1.13207 / 90.09 | 1.13996 / 92.98 |
+  | θ6 (1,3,2) | 1.13207 / 90.08 | 1.13999 / 92.99 |
+  | θ12 (1,2,2) | 1.13196 / 90.04 | 1.13977 / 92.93 |
+  | θ6 (1,2,2) | 1.13195 / 90.02 | 1.13985 / 92.94 |
+  | θ10 (1,2,2) | 1.13192 / 90.01 | 1.13987 / 92.94 |
+  | θ8 (1,2,2) | 1.13191 / 90.01 | 1.13986 / 92.95 |
+
+  All 69 programs: 1.13439 / 90.93 % against 1.13596 / 91.42 % (−0.49 points). θ and the (2,3,3)/(2,4,4) choice are
+  within 0.0001 of speedup of each other: noise. Applied: CB 4, SB 8 (|sum| ≤ 78), PL 8, CTRL[15] removed (reads 0,
+  writes ignored; reset CTRL still 0x7DA0), θ start 10, reference weights 2, 3, 3; model, random generator (CTRL
+  writes now set bit 15 now and then), cosim, coverage (8 feature settings), test.py (reset CTRL and bit 15 checked),
+  host, SPEC. Verification: cocotb latch cells / flip-flop model / repository top 3/3 each; random 4 × 50,000 plain
+  and concurrent: 0 reply, statistics, state and background mismatches, coverage 100 % (the 16 cross bins not hit
+  are the 16 that cannot occur); co-simulation of 6 programs (team.coremarkish, embench.nettle-aes,
+  numeric.mandelbrot, embench.nsichneu, coremark, embench.crc32; 11.1 million requests through the model): 0
+  mismatches, statistics equal the model, one-in-flight mispredictions equal bpsim on 6 of 6, in-flight
+  mispredictions of the default equal bpsim on 4 of 6 (team.coremarkish 18,885 vs 18,800, coremark 72,616 vs
+  72,604; gshare also differs on team.coremarkish: the known difference of the misprediction-alone rule, 47 of 69
+  before); formal prove, nowait, cover pass. Local build: 74.2 % instance utilisation (53,848 µm² cells, was
+  58,947 µm² / 81.2 %), routing DRC 0, Magic DRC 0, LVS 0, antenna 0, setup **+1.87 ns** at the slow corner (was
+  +3.87; worst path BC table → reference terms of the sum → CONF; probably the ×3 weights, which need an adder where
+  ×4 was a shift, ESTIMATED), hold +0.056 ns, 2,140 max-slew / 3 max-cap warnings (was 2,259 / 5), gate-level test
+  3/3. Synthesised 49,406 µm² (was 54,112): weight tables 4 × 3,237, the two sums 2 × 1,107.

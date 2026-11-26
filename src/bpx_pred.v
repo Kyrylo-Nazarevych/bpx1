@@ -11,8 +11,7 @@
 //               The weights learn (+-1, saturating) when the prediction was wrong or |sum| <= theta.
 //               Switchable (feat): [0] the bracket: the reference predictors' counters as further inputs;
 //               [1] the outcome just before a table's history segment negates its weight (stored as the bitwise
-//               complement, so that one weight serves two history patterns); [2] theta adapts; [3] experiment:
-//               only the signs of the weights vote (binarised inference), training unchanged.
+//               complement, so that one weight serves two history patterns); [2] theta adapts.
 //
 // One read port.  rsel picks the lookup: 0 = predict (id_p, speculative history), 1 = commit (id_c, committed
 // history; used for staging), 2 = raw table address for the control port.  `look` is the summary of the current
@@ -31,20 +30,20 @@ module bpx_pred #(
     parameter HG  = 4,             // gshare history bits (HG <= LGG)
     parameter NT  = 4,
     parameter LGT = 5,
-    parameter CB  = 5,
+    parameter CB  = 4,
     parameter [NT*6-1:0] LV = {6'd20, 6'd9, 6'd8, 6'd0},
     parameter HL  = 21,
-    parameter PL  = 16,            // path history bits (one identifier bit per branch)
+    parameter PL  = 8,             // path history bits (one identifier bit per branch)
     parameter UBW = 2,
-    parameter UGW = 4,
-    parameter UTW = 4,
+    parameter UGW = 3,
+    parameter UTW = 3,
     parameter SK  = 0,
-    parameter THETA = 12,
-    parameter SB  = 9
+    parameter THETA = 10,
+    parameter SB  = 8              // sum bits: |sum| <= NT (2^CB - 1) + 3 UBW + 3 UGW + UTW = 78 < 128
 ) (
     input  wire               clk,
     input  wire               rst,       // synchronous: threshold and its adaptation counter to their initial values
-    input  wire [3:0]         feat,
+    input  wire [2:0]         feat,
     // write sequencer (shared by all tables)
     input  wire               wcap,
     input  wire               wact,
@@ -118,7 +117,7 @@ module bpx_pred #(
   wire s_pbim, s_pgsh, s_ptrn, s_pdef, s_low;
   wire [3:0] s_conf;
   bpx_psum #(.NT(NT), .CB(CB), .SB(SB), .THB(THB), .UBW(UBW), .UGW(UGW), .UTW(UTW)) u_cs (
-      .base(stg[5:0]), .wts(stg[CB*NT+5:6]), .neg(neg_c), .refs(feat[0]), .bin(feat[3]), .theta(theta),
+      .base(stg[5:0]), .wts(stg[CB*NT+5:6]), .neg(neg_c), .refs(feat[0]), .theta(theta),
       .p_bim(s_pbim), .p_gsh(s_pgsh), .p_trn(s_ptrn), .p_def(s_pdef), .low(s_low), .conf(s_conf));
 
   wire       cho_we  = s_pbim != s_pgsh;
@@ -247,7 +246,7 @@ module bpx_pred #(
   assign look[5:0] = {r_g, r_bc[3:2], r_bc[1:0]};
   wire l_low;
   bpx_psum #(.NT(NT), .CB(CB), .SB(SB), .THB(THB), .UBW(UBW), .UGW(UGW), .UTW(UTW)) u_cl (
-      .base(look[5:0]), .wts(look[CB*NT+5:6]), .neg(r_commit ? neg_c : neg_p), .refs(feat[0]), .bin(feat[3]), .theta(theta),
+      .base(look[5:0]), .wts(look[CB*NT+5:6]), .neg(r_commit ? neg_c : neg_p), .refs(feat[0]), .theta(theta),
       .p_bim(p_bim), .p_gsh(p_gsh), .p_trn(p_trn), .p_def(p_def), .low(l_low), .conf(conf));
 
   wire [2:0]  dbg_ti = dbg_tab[2:0];
@@ -290,7 +289,6 @@ module bpx_psum #(
     input  wire [CB*NT-1:0] wts,
     input  wire [NT-1:0]    neg,
     input  wire             refs,     // the reference predictors' counters are inputs of the sum
-    input  wire             bin,      // the prediction is the majority of the weights' signs
     input  wire [THB-1:0]   theta,
     output wire             p_bim,
     output wire             p_gsh,
@@ -312,22 +310,18 @@ module bpx_psum #(
   wire signed [2:0]    vg = {~gsh[1], gsh[0], 1'b1};
   wire signed [SB-1:0] rsum = $signed(vb) * UBW + $signed(vg) * UGW + (p_trn ? UTW : -UTW);
 
-  reg signed [SB-1:0] acc, accb;
+  reg signed [SB-1:0] acc;
   reg signed [CB:0]   v;
-  reg signed [1:0]    sv;
   integer i;
   always @* begin
-    acc  = refs ? rsum : {SB{1'b0}};
-    accb = refs ? rsum : {SB{1'b0}};
+    acc = refs ? rsum : {SB{1'b0}};
     for (i = 0; i < NT; i = i + 1) begin
-      v    = {wts[CB*i+:CB] ^ {CB{neg[i]}}, 1'b1};
-      sv   = {wts[CB*i+CB-1] ^ neg[i], 1'b1};         // +1 or -1: the sign of the weight as it counts
-      acc  = acc + v;
-      accb = accb + sv;
+      v   = {wts[CB*i+:CB] ^ {CB{neg[i]}}, 1'b1};
+      acc = acc + v;
     end
   end
   wire [SB-1:0] mag = acc[SB-1] ? (~acc + 1'b1) : acc;
-  assign p_def = bin ? ~accb[SB-1] : ~acc[SB-1];
+  assign p_def = ~acc[SB-1];
   assign low   = mag <= {{(SB - THB) {1'b0}}, theta};
   assign conf  = {(trnctr == 2'd0) | (trnctr == 2'd3), (gsh == 2'd0) | (gsh == 2'd3), (bim == 2'd0) | (bim == 2'd3), ~low};
 endmodule

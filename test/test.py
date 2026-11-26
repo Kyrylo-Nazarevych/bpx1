@@ -196,8 +196,9 @@ async def random_ops_against_model(dut):
         else:
             m.drive = rng.choice([0, 0, 1, 2, 3, 4])
             m.frozen = rng.random() < 0.2
-            m.feat = rng.choice([m.cfg.FEAT] * 4 + list(range(16)))
-            await h.spi(0x01, [m.ctrl_word()])
+            m.feat = rng.choice([m.cfg.FEAT] * 4 + list(range(8)))
+            # CTRL[15] (removed binarised inference) is set now and then: the chip must ignore it
+            await h.spi(0x01, [m.ctrl_word() | (0x8000 if rng.random() < 0.3 else 0)])
             continue
         exp = m.request(op, arg)
         pred, conf, cyc = await h.request(op, arg)
@@ -260,7 +261,9 @@ async def raw_access_write(dut):
         assert await rd(t, 8) == m0.raw(t, 8) and await rd(t, 10) == m0.raw(t, 10), f"weight table {i}: neighbours changed"
     await wr(7, 4, 0, 0x2A3)
     assert await rd(7, 4) == 0x2A3, "threshold and adaptation counter"
-    assert (await h.spi(0x01, n=1))[0] == m0.ctrl_word(), "CTRL after reset"
+    assert (await h.spi(0x01, n=1))[0] == m0.ctrl_word() == 0x7DA0, "CTRL after reset"
+    await h.spi(0x01, [0xFDA0])
+    assert (await h.spi(0x01, n=1))[0] == 0x7DA0, "CTRL[15] must read 0 and ignore writes"
     # the bimodal predictor uses the written counter: entry 5 is now strongly taken, entry 4 still weakly not-taken
     await h.spi(0x01, [0x0DA1])
     pred, _, _ = await h.request(bpx1.OP_PREDICT, 5)

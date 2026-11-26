@@ -267,8 +267,9 @@ int main(int argc, char** argv) {
     top->rst_n = 1;
     for (int i = 0; i < 40 && !((top->uo_out >> 4) & 1); i++) tick();
     if (!((top->uo_out >> 4) & 1)) { fprintf(stderr, "not ready\n"); return 3; }
-    // CTRL: the driving predictor; DBG selections as after reset; features of the default predictor (BPX_FEAT, default 7)
-    { int feat = getenv("BPX_FEAT") ? atoi(getenv("BPX_FEAT")) : 7; u32 c = drv | 0x0DA0 | ((feat & 15) << 12); spi(0x01, true, &c, 1); }
+    // CTRL: the driving predictor; DBG selections as after reset; features of the default predictor in CTRL[14:12]
+    // (BPX_FEAT 0..7, default 7 as after reset; CTRL[15] is unused and reads 0)
+    { int feat = getenv("BPX_FEAT") ? atoi(getenv("BPX_FEAT")) : 7; u32 c = drv | 0x0DA0 | ((feat & 7) << 12); spi(0x01, true, &c, 1); }
 
     if (getenv("BPX_SEQ")) {            // one branch in flight: every record is one PREDICT+RESOLVE request (U2)
         u64 n = 0, wrong = 0, since = 0;

@@ -18,10 +18,10 @@ OP_SPECIAL, OP_PREDICT, OP_PREDICT_RESOLVE_NT, OP_PREDICT_RESOLVE_T = 0, 1, 2, 3
 SUB_NOP, SUB_FLUSH, SUB_RESOLVE_NT, SUB_RESOLVE_T = 0, 1, 2, 3
 DRV_DEFAULT, DRV_BIMODAL, DRV_GSHARE, DRV_TOURNAMENT, DRV_NOT_TAKEN = 0, 1, 2, 3, 4
 ERR_RESOLVE_EMPTY, ERR_PREDICT_FULL, ERR_WITHDRAWN = 1, 2, 4
-# switchable parts of the default predictor (CTRL[15:12]); all off = the plain hashed perceptron ("safe mode")
-# FEAT_BIN (off after reset) is an experiment: only the signs of the weights vote (a majority, as in a binarised
-# neural network); the weights still train in full
-FEAT_REF, FEAT_SX, FEAT_DYN, FEAT_BIN = 1, 2, 4, 8
+# switchable parts of the default predictor (CTRL[14:12]); all off = the plain hashed perceptron ("safe mode").
+# CTRL[15] (binarised inference until the mosaic round) is gone: it reads 0 and writes to it are ignored.
+FEAT_REF, FEAT_SX, FEAT_DYN = 1, 2, 4
+FEAT_MASK = 7
 
 
 def fold(v: int, inbits: int, outbits: int) -> int:
@@ -44,13 +44,13 @@ class Config:
     HG: int = 4                       # gshare history bits
     # weight tables of the default predictor (a hashed perceptron): (entries, history length), shortest history first
     weights: List[Tuple[int, int]] = field(default_factory=lambda: [(32, 0), (32, 8), (32, 9), (32, 20)])
-    CB: int = 5                  # weight bits (two's complement)
+    CB: int = 4                  # weight bits (two's complement)
     UBW: int = 2                # the bimodal counter enters the sum as (2c-3) * UBW   (FEAT_REF)
-    UGW: int = 4                # the gshare counter enters the sum as (2c-3) * UGW    (FEAT_REF)
-    UTW: int = 4                # the tournament prediction enters the sum as +-UTW     (FEAT_REF)
-    PL: int = 16                      # path history: one identifier bit of each of the last PL branches (0 = none)
+    UGW: int = 3                # the gshare counter enters the sum as (2c-3) * UGW    (FEAT_REF)
+    UTW: int = 3                # the tournament prediction enters the sum as +-UTW     (FEAT_REF)
+    PL: int = 8                       # path history: one identifier bit of each of the last PL branches (0 = none)
     SK: int = 0                  # table i rotates the upper identifier bits by i * SK in its index hash
-    THETA: int = 12           # training threshold after a clear
+    THETA: int = 10           # training threshold after a clear
     THMIN: int = 1
     THMAX: int = 63
     TCB: int = 4                      # bits of the threshold-adaptation counter (FEAT_DYN)
@@ -148,7 +148,7 @@ class Bpx1:
         L.p_bim = bim >> 1
         L.p_gsh = gsh >> 1
         L.p_trn = L.p_gsh if cho >= 2 else L.p_bim
-        s = sb = 0
+        s = 0
         for i, (e, hl) in enumerate(c.weights):
             lg = self.lgt[i]
             lo, hi = ident & (e - 1), fold(ident >> lg, max(c.W - lg, 1), lg)
@@ -166,13 +166,10 @@ class Bpx1:
             L.neg.append(neg)
             w = self.wt[i][idx]
             s += -(2 * w + 1) if neg else 2 * w + 1
-            sb += 1 if (w >= 0) != bool(neg) else -1
         if self.feat & FEAT_REF:
-            r = c.UBW * (2 * bim - 3) + c.UGW * (2 * gsh - 3) + (c.UTW if L.p_trn else -c.UTW)
-            s += r
-            sb += r
-        L.s = s                                  # the margin (training rule, confidence) is always the full sum
-        L.p_def = 1 if (sb if self.feat & FEAT_BIN else s) >= 0 else 0
+            s += c.UBW * (2 * bim - 3) + c.UGW * (2 * gsh - 3) + (c.UTW if L.p_trn else -c.UTW)
+        L.s = s
+        L.p_def = 1 if s >= 0 else 0
         L.conf = [1 if abs(s) > self.theta else 0, 1 if bim in (0, 3) else 0, 1 if gsh in (0, 3) else 0,
                   1 if (gsh if cho >= 2 else bim) in (0, 3) else 0]
         return L
@@ -308,7 +305,11 @@ class Bpx1:
 
     def ctrl_word(self, dbg0=10, dbg1=13):
         """The CTRL register for the present settings (DBG selections as after reset)."""
-        return self.drive | (8 if self.frozen else 0) | (dbg0 << 4) | (dbg1 << 8) | (self.feat << 12)
+        return self.drive | (8 if self.frozen else 0) | (dbg0 << 4) | (dbg1 << 8) | ((self.feat & FEAT_MASK) << 12)
+
+    def write_ctrl(self, value: int):
+        """A write of CTRL as the chip takes it (DBG selections are not modelled; CTRL[15] is ignored)."""
+        self.drive, self.frozen, self.feat = value & 7, bool(value & 8), (value >> 12) & FEAT_MASK
 
     # ------------------------------------------------------------------ observation
     def stats(self):

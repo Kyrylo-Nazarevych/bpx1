@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Replay a request log of the co-simulation (cosim/cosim.cpp) through the golden model (spec VR-01).
 
-  replay.py <oplog.bin> <drive>          (BPX_FEAT=<0..15>: the features of the default predictor, default as after reset)
+  replay.py <oplog.bin> <drive>          (BPX_FEAT=<0..7>: the features of the default predictor, default as after reset)
 
 Every reply of the RTL (prediction and confidence) is compared with the model; prints the model's statistics in the
 same key=value form as the co-simulation, and mismatches=<n> with the first mismatching request.
@@ -15,7 +15,7 @@ def main():
     data = open(sys.argv[1], "rb").read()
     m = bpx1.Bpx1(bpx1.Config(STATW=40))
     m.drive = int(sys.argv[2])
-    m.feat = int(os.environ.get("BPX_FEAT", m.cfg.FEAT))     # as cosim.cpp writes CTRL[15:12]
+    m.feat = int(os.environ.get("BPX_FEAT", m.cfg.FEAT)) & bpx1.FEAT_MASK     # as cosim.cpp writes CTRL[14:12]
     bad, first = 0, None
     for i in range(0, len(data), 4):
         op, ident, rep = data[i], data[i + 1] | (data[i + 2] << 8), data[i + 3]

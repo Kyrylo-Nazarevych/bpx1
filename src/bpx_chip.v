@@ -21,17 +21,17 @@ module bpx_chip #(
     parameter HG  = 4,
     parameter NT  = 4,
     parameter LGT = 5,
-    parameter CB  = 5,
+    parameter CB  = 4,
     parameter [NT*6-1:0] LV = {6'd20, 6'd9, 6'd8, 6'd0},
     parameter HL  = 21,
-    parameter PL  = 16,
+    parameter PL  = 8,
     parameter UBW = 2,
-    parameter UGW = 4,
-    parameter UTW = 4,
+    parameter UGW = 3,
+    parameter UTW = 3,
     parameter SK  = 0,
-    parameter THETA = 12,
-    parameter SB  = 9,
-    parameter FEAT = 4'b0111,      // features of the default predictor enabled after reset (CTRL[15:12])
+    parameter THETA = 10,
+    parameter SB  = 8,
+    parameter FEAT = 3'b111,       // features of the default predictor enabled after reset (CTRL[14:12])
     parameter STATW = 16
 ) (
     input  wire [7:0] ui_in,

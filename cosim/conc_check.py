@@ -101,7 +101,7 @@ def main():
             m.clear_stats()
             n += 1
         elif t[0] == "W" and t[1] == "1":
-            m.drive, m.frozen, m.feat = int(t[2]) & 7, bool(int(t[2]) & 8), (int(t[2]) >> 12) & 15
+            m.write_ctrl(int(t[2]))
         elif t[0] == "W" and t[1] == "15":
             raw_addr = int(t[2])
         elif t[0] == "W" and t[1] == "16":

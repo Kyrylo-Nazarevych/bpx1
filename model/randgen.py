@@ -129,8 +129,9 @@ def main():
         if r < 0.0015:
             m.drive = rng.choice([0, 0, 0, 1, 2, 3, 4])
             m.frozen = rng.random() < 0.15
-            m.feat = rng.choice([cfg.FEAT] * 6 + list(range(16)))
-            ops.write(f"W 1 {m.ctrl_word()}\n")
+            m.feat = rng.choice([cfg.FEAT] * 6 + list(range(8)))
+            # CTRL[15] (removed binarised inference) is set now and then: the chip must ignore it
+            ops.write(f"W 1 {m.ctrl_word() | (0x8000 if rng.random() < 0.3 else 0)}\n")
             continue
         if conc and r < 0.0025:
             continue

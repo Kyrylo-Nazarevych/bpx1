@@ -132,11 +132,11 @@ class Bpx1Host:
 
     def set_drive(self, drive=0, freeze=False, features=7, dbg0=10, dbg1=13):
         """Which predictor answers the host: 0 default, 1 bimodal, 2 gshare, 3 tournament, 4 static not-taken.
-        features (CTRL[15:12]) of the default predictor: 1 reference inputs, 2 negation in memory, 4 adaptive
-        threshold (7 = as after reset), 8 binarised inference (experiment); 0 = safe mode, the plain perceptron.
+        features (CTRL[14:12]) of the default predictor: 1 reference inputs, 2 negation in memory, 4 adaptive
+        threshold (7 = as after reset); 0 = safe mode, the plain perceptron.  CTRL[15] is unused (reads 0).
         dbg0, dbg1: events on the DBG pins (10 and 13: the last predictions of the default predictor and the
         tournament, as after reset)."""
-        self.write(REG_CTRL, (drive & 7) | (8 if freeze else 0) | ((dbg0 & 15) << 4) | ((dbg1 & 15) << 8) | ((features & 15) << 12))
+        self.write(REG_CTRL, (drive & 7) | (8 if freeze else 0) | ((dbg0 & 15) << 4) | ((dbg1 & 15) << 8) | ((features & 7) << 12))
 
     def command(self, bits):
         self.write(REG_CMD, bits)

@@ -152,7 +152,7 @@ single steps. Raw table reads use cycles the predict port leaves free and never 
 | Addr | Name | Access | Content |
 | --- | --- | --- | --- |
 | 0x00 | ID | R | `0xB101` |
-| 0x01 | CTRL | RW | `[2:0]` driving predictor: 0 default, 1 bimodal, 2 gshare, 3 tournament, 4–7 static not-taken; `[3]` freeze learning; `[7:4]` DBG0 event; `[11:8]` DBG1 event; `[15:12]` features of the default predictor (section 7): `[12]` reference inputs, `[13]` negation in memory, `[14]` adaptive threshold, `[15]` binarised inference (experiment). After reset: `0x7DA0`. |
+| 0x01 | CTRL | RW | `[2:0]` driving predictor: 0 default, 1 bimodal, 2 gshare, 3 tournament, 4–7 static not-taken; `[3]` freeze learning; `[7:4]` DBG0 event; `[11:8]` DBG1 event; `[14:12]` features of the default predictor (section 7): `[12]` reference inputs, `[13]` negation in memory, `[14]` adaptive threshold; `[15]` unused (reads 0, writes ignored). After reset: `0x7DA0`. |
 | 0x02 | CMD | W | bit 0 soft reset; bit 1 clear predictors (tables, histories, in-flight work); bit 2 clear statistics and error flags; bit 3 snapshot the statistics; bit 4 snapshot and clear the counters in one step (no event lost or counted twice) |
 | 0x03 | STATUS | R | `[2:0]` in-flight count; `[3]` ready; `[4]` staging valid; `[5]` request pending; `[6]` table write in progress; `[7]` raw access pending; `[8]` resolve refused (queue empty); `[9]` predict refused (queue full); `[10]` request withdrawn; `[11]` statistics overflow (flags are sticky) |
 | 0x04 | ERRCNT | R | `[7:0]` refused or withdrawn requests, saturating |
@@ -160,10 +160,10 @@ single steps. Raw table reads use cycles the predict port leaves free and never 
 | 0x0F | RAW_ADDR | RW | `[6:0]` entry; `[11:8]` space: 0 bimodal+chooser, 1 gshare, 7 small registers, 8–11 weight tables 0–3; `[13:12]` field write enables; `[15]` address + 1 after each RAW_DATA read |
 | 0x10 | RAW_DATA | RW | Read: the addressed entry (fetched after RAW_ADDR is written and after each read). Write: the entry fields enabled in RAW_ADDR. |
 
-Raw entries: space 0 `{chooser[1:0], bimodal[1:0]}`; space 1 `gshare[1:0]`; weight tables `w[4:0]` (two's
+Raw entries: space 0 `{chooser[1:0], bimodal[1:0]}`; space 1 `gshare[1:0]`; weight tables `w[3:0]` (two's
 complement, write enable bit 12). Space 7: 0–1 committed outcome history, 2–3 speculative outcome history (12 bits
-per word), 4 `{theta[5:0], adaptation counter[3:0]}` (writable), 5–6 committed path history, 7–8 speculative path
-history, 9 queue pointers and flags. Every bit of predictor state and
+per word), 4 `{theta[5:0], adaptation counter[3:0]}` (writable), 5 committed path history, 7 speculative path history (6 and 8, the upper path-history
+words, read 0), 9 queue pointers and flags. Every bit of predictor state and
 configuration is readable while requests run (FR-10); tables and the two small predictor registers are writable.
 
 DBG events (CTRL): 1 request seen, 2 predict done, 3 resolve done, 4 misprediction repair, 5 flush, 6 refusal or
@@ -245,51 +245,50 @@ prediction events change in the same clock as `ACK`; the other events one clock 
 
 ## 7. Predictor algorithm (evidence in docs/perceptron.md and docs/exploration.md)
 
-Total predictor storage: **1,152 bits** in six latch tables. `fold(v, n)` is the XOR of the consecutive n-bit
-slices of v; `h[L-1:0]` are the L most recent outcomes of the history in use (bit 0 = most recent); `p[15:0]` is the
-path history: one bit, `ID[0] ^ ID[3]`, of each of the last 16 branches.
+Total predictor storage: **1,024 bits** in six latch tables. `fold(v, n)` is the XOR of the consecutive n-bit
+slices of v; `h[L-1:0]` are the L most recent outcomes of the history in use (bit 0 = most recent); `p[7:0]` is the
+path history: one bit, `ID[0] ^ ID[3]`, of each of the last 8 branches.
 
 | Table | Entries × bits | Index | Content, initial value |
 | --- | --- | --- | --- |
 | BC | 64 × (2 + 2) | `fold(ID, 6)` | bimodal counter (01) and chooser counter (01), separately writable |
 | G | 128 × 2 | `fold(ID, 7) ^ (h[3:0] << 3)` | gshare counter (01) |
-| W0 | 32 × 5 | `ID[4:0] ^ ID[7:5]` | signed weight; 0 |
-| W1, W2, W3 | 32 × 5 each, history lengths L = 8, 9, 20 | `ID[4:0] ^ ID[7:5] ^ fold(h[L-1:0], 5) ^ (fold(h[L-1:0], 4) << 1) ^ rot2(fold(p[min(L,16)-1:0], 5))` | signed weight; −1, 0, −1 |
+| W0 | 32 × 4 | `ID[4:0] ^ ID[7:5]` | signed weight; 0 |
+| W1, W2, W3 | 32 × 4 each, history lengths L = 8, 9, 20 | `ID[4:0] ^ ID[7:5] ^ fold(h[L-1:0], 5) ^ (fold(h[L-1:0], 4) << 1) ^ rot2(fold(p[min(L,8)-1:0], 5))` | signed weight; −1, 0, −1 |
 
-`rot2` rotates five bits left by two. Small registers: threshold θ (6 bits, starts at 12), its adaptation counter
+`rot2` rotates five bits left by two. Small registers: threshold θ (6 bits, starts at 10), its adaptation counter
 (4 bits, signed, starts at 0), committed and speculative outcome history (21 bits each), committed and speculative
-path history (16 bits each).
+path history (8 bits each).
 
 **Reference predictors (FR-07).** bimodal = BC counter MSB. gshare = G counter MSB. tournament = gshare if the
 chooser MSB is 1, else bimodal. They train on every resolved branch by the classic rules: both counters move toward
 the outcome; the chooser moves toward the component that was right when the two disagree. A reference is confident
 when the counter it used is saturated (0 or 3).
 
-**Default predictor: a hashed perceptron.** With the features of CTRL[15:12] as after reset:
+**Default predictor: a hashed perceptron.** With the features of CTRL[14:12] as after reset:
 
 ```
 neg_i = h[L_i]                      for i = 1..3 (the outcome just before the table's history segment); neg_0 = 0
 v_i   = neg_i ? -(2 w_i + 1) : (2 w_i + 1)          = 2 (w_i ^ neg_i) + 1: the stored bits read complemented
-sum   = v_0 + v_1 + v_2 + v_3 + 2 (2 bim - 3) + 4 (2 gsh - 3) + (tournament ? +4 : -4)
+sum   = v_0 + v_1 + v_2 + v_3 + 2 (2 bim - 3) + 3 (2 gsh - 3) + (tournament ? +3 : -3)
 prediction = (sum >= 0)            confidence (FR-11) = |sum| > theta
 ```
 
 **Training** at resolve, from the committed lookup of that branch (committed outcome and path history) and the
 outcome only: if the prediction recomputed at resolve was wrong, or `|sum| <= theta`, every `w_i` moves one step
-(up if `outcome != neg_i`, else down), saturating at −16 and +15. Then the threshold adapts: on a wrong prediction
+(up if `outcome != neg_i`, else down), saturating at −8 and +7 (|sum| <= 4 × 15 + 6 + 9 + 3 = 78: an 8-bit sum). Then the threshold adapts: on a wrong prediction
 the adaptation counter goes up, and when it is at +7 it returns to 0 and θ goes up by one (to at most 63); on a right
 prediction with `|sum| <= theta` it goes down, and at −8 it returns to 0 and θ goes down by one (to at least 1). The
 reference tables train as above. The speculative path history is repaired with the outcome history (FR-04).
 
-**Features (CTRL[15:12]).** `[12]` = 0 removes the three reference terms from the sum. `[13]` = 0 sets every
-`neg_i` to 0. `[14]` = 0 stops the threshold adapting (θ stays; it is writable through raw space 7). `[15]` = 1 is
-the experiment *binarised inference*: the prediction is the sign of the same sum with every `v_i` replaced by its
-sign (±1); training and confidence still use the full sum. All 16 combinations are in the golden model and are
-verified alike. **Safe mode:** `[15:12] = 0`, the plain hashed perceptron; or any reference predictor driving
+**Features (CTRL[14:12]).** `[12]` = 0 removes the three reference terms from the sum. `[13]` = 0 sets every
+`neg_i` to 0. `[14]` = 0 stops the threshold adapting (θ stays; it is writable through raw space 7). All 8
+combinations are in the golden model and are verified alike. (CTRL[15], binarised inference until 26 Nov 2026, was
+removed in the mosaic round.) **Safe mode:** `[14:12] = 0`, the plain hashed perceptron; or any reference predictor driving
 (CTRL[2:0]), which shares no logic with the sum.
 
 **Sizes of the references, and why.** Bimodal + chooser 256 bits, gshare 256 bits: the reference tournament has 512
-bits, the default predictor adds 640. Each reference is somewhat below its own saturation (a 128-entry bimodal alone
+bits, the default predictor adds 512. Each reference is somewhat below its own saturation (a 128-entry bimodal alone
 would score 1.0 point more, a 4096-entry one 1.9 more); the gshare history of 4 bits is the best history for a
 128-entry tournament on the benchmark set. Nothing was shrunk to widen the gap (docs/exploration.md).
 
