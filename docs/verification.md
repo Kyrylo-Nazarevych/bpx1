@@ -11,8 +11,8 @@ session that wrote this file, on the RTL of the commit that contains it; the com
 | FR-10 in a live run (U4) | section 2a: control port working while requests run, 10 × 100,000 operations | 8,288 background jobs (snapshots, snapshot-and-clears, raw reads and writes), 11,733 checked values, **0 mismatches**; replies and final state still equal the model; the reverted deadlock fix is caught in 4 of 4 runs **(VERIFIED)** |
 | VR-02 functional coverage | `docs/coverage.md`, `docs/coverage_bins.md` | 52 of 52 reachable bins of the required cross, 125 of 125 other bins **(VERIFIED)**; 16 cross bins excluded, each by a formal assertion |
 | VR-03 formal | section 4 | all assertions proven by k-induction (unbounded) and checked by BMC to 60 clocks; 12 cover traces **(VERIFIED)**; found two defects in the RTL (before this design), both fixed |
-| VR-04 gate level | `tools/harden.sh` locally on the built netlist; CI job `gl_test` | passes locally **(VERIFIED)**; CI: section 6 |
-| VR-05 CI reports reviewed | section 6 | section 6 |
+| VR-04 gate level | `tools/harden.sh` locally on the built netlist; CI job `gl_test` | passes locally **(VERIFIED)** and in CI **(VERIFIED by CI)** |
+| VR-05 CI reports reviewed | section 6 | gds, precheck, gl_test, viewer, test, docs green on commit `793a339` |
 | VR-06 system co-simulation | `docs/cosim.md`, `docs/cosim_dual.md`, `docs/cosim_safe.md` | default predictor 1.1324× over static not-taken (1.1361× with two requests per cycle), 91.42 % accurate **(VERIFIED)** |
 | PF-01 | cosim.md 2 | default 1.1324 > tournament 1.1239 > gshare 1.1180 > bimodal 1.1161 > 1 **(VERIFIED)** |
 | PF-02 | cosim.md 2, 3 | default 91.42 % > tournament 88.92 % > gshare 87.29 % > bimodal 86.47 %; below the best reference on 2 of 69 programs (`sys.json` −0.68 points, `interp.expr` −0.27) **(VERIFIED)** |
@@ -113,7 +113,7 @@ the first cycle is assumed. Properties: the `ifdef FORMAL` block at the end of `
 | --- | --- | --- | --- |
 | `prove` | k-induction, k = 24: every assertion from **any** state that satisfies the assertions, so no depth limit | 8 / 16 / 8 entries | **proven** (6.3 minutes) **(VERIFIED)** |
 | `bmc` | bounded check from reset, 60 clocks | 8 / 16 / 8 | pass **(VERIFIED)** |
-| `bmcfull` | bounded check from reset, 30 clocks | the chip's 64 / 128 / 32 | no violation in clocks 0 to 21 when this file was written (the run is limited to 40 minutes) **(VERIFIED)** |
+| `bmcfull` | bounded check from reset, 30 clocks | the chip's 64 / 128 / 32 | no violation in clocks 0 to 26; stopped by the 40-minute limit while checking clock 27 **(VERIFIED)** |
 | `cover` | 12 traces: each operation completing; the queue filling; a refused predict and a refused resolve; resolve-first with a full queue; a mispredicted resolve with a full queue, the predict after it, and the return to idle with three branches resolved | 8 / 16 / 8 | all reached within 15 clocks **(VERIFIED)** |
 | `nowait` | legal host and silent control port: the requests that can never be made to wait (docs/coverage.md) | 8 / 16 / 8 | **proven** by k-induction (2.2 minutes) **(VERIFIED)** |
 
@@ -180,8 +180,9 @@ the slow corner on the tables' select nets (warnings of the library's characteri
 violations; the paths through them are inside the reported slack).
 
 CI: the tagged-table design's last commit (`dffc289`, tag `g3`) was green on gds, precheck, gl_test, viewer, test
-and docs **(VERIFIED by reading the runs of its RTL commits)**. The CI run of the commit that contains this file is
-the sign-off for the perceptron design; its result is recorded in docs/HANDOVER.md.
+and docs **(VERIFIED by reading the runs of its RTL commits)**. The perceptron design, commit `793a339` (this RTL):
+gds, precheck, gl_test, viewer, test and docs all success **(VERIFIED by reading the run)**. The utilisation figure
+of the CI build was not read (it is on the run's summary page).
 
 ## 7. Open items
 

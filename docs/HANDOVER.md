@@ -79,10 +79,9 @@ the mirror: copy them back to the Windows folder after generating (the sync is o
 
 ## 5. Next steps, in order
 
-1. **Read the CI run of the last push** (`gh run list -R Kyrylo-Nazarevych/bpx1`): gds, precheck, gl_test, test,
-   docs. If gds fails on routing in CI (utilisation is 81 %; CI machines place slightly differently), lower the
-   risk with `PL_TARGET_DENSITY_PCT` 82, or drop the binarised-inference switch, and rebuild; the fallback tag
-   `g3-tage` is always submittable.
+1. Done: CI of the perceptron RTL commit `793a339` is green (gds, precheck, gl_test, viewer, test, docs)
+   **(VERIFIED by reading the run)**; it is tagged `g3-perceptron`. After any further change read the CI run of
+   that push; the fallback tag `g3-tage` is always submittable.
 2. Owners: review docs/perceptron.md (choice, switches, 33 MHz) and tell the FPGA team about the pin change:
    8-bit `ID`, `uio[1:0]` are chip outputs, `CONF` follows the driving predictor.
 3. Open the demo-board schematic PDF to settle the header pins for `clk`/`rst_n` (docs/bringup.md 6).
@@ -124,7 +123,7 @@ $12 in total.** No `bpx1-*` machine exists now **(VERIFIED: instance list after 
 
 | Risk | Status |
 | --- | --- |
-| Routing at 81 % utilisation in CI | Local build clean after 5 routing passes. CI is the confirmation (step 1). |
+| Routing at 81 % utilisation | Clean locally and in CI (commit `793a339`). Little room is left for additions. |
 | A defect neither simulation nor the proofs see | Reduced: the proofs cover the sequencer under free inputs; the perceptron arithmetic is covered by simulation against the model in all 16 feature settings, and the model equals the separately written simulator exactly on all programs. |
 | The FPGA side still assumes 10-bit ID and input-only `uio` | Open until the owners pass on D12 (step 2). An FPGA driving `uio[1:0]` would fight the chip's outputs. |
 | Latch write paths outside static timing | Accepted by construction; exercised at cell and gate level (docs/bringup.md 4). |
