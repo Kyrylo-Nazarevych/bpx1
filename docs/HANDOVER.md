@@ -78,9 +78,8 @@ them back to the Windows folder after generating (the sync is one-way, Windows t
    fixes touch the read-select path; local slack was +3.35 ns). A local `bash tools/harden.sh` gives the numbers CI
    does not print.
 2. **Owners' decision on D10** (below, section 9) and anything else they want before G3 is declared.
-3. Close the simulation gap that let the deadlock through: a concurrent-control-port mode in `cosim --rand` (SPI
-   commands issued while requests are in flight; replies are order-independent only for some commands, so the
-   generator must restrict itself to snapshot, statistics reads and raw reads). Formal already covers it.
+3. Done (tag `g3`): concurrent-control-port mode of the random regression (`CONC=1 bash cosim/random.sh`,
+   verification.md 2a); it catches the deadlock when the fix is reverted.
 4. Host kit on hardware: `host/bpx1.py` has not run on a demo board; microcotb port of `test/test.py`
    (docs/bringup.md 6).
 5. Optional improvements, none blocking: slew warnings at the slow corner on the table select nets; 50 MHz by
@@ -102,6 +101,7 @@ cd test && make -B -f Makefile.bpx [BEHAV=yes]           # bpx_chip with latch c
 bash cosim/run.sh ; python3 cosim/report.py              # 71 programs against the RTL -> docs/cosim.md
 BPX_DUAL=1 OUT=out/cosim_dual bash cosim/run.sh 16 ; python3 cosim/report.py out/cosim_dual    # -> docs/cosim_dual.md
 bash cosim/random.sh 10 100000                           # random operations, coverage -> docs/coverage_bins.md
+CONC=1 bash cosim/random.sh 10 100000                    # control port concurrent with requests (verification.md 2a)
 bash formal/run.sh <prove|bmc|cover|nowait|bmcfull>      # formal tasks
 bash tools/harden.sh                                     # local chip build of the repository top + gate-level test
 python3 explore/report.py <refs|families|pick [budget]|sens|charts>     # exploration reports (model)

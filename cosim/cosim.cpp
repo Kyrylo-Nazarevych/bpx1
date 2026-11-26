@@ -22,14 +22,54 @@ struct Rec { u32 pc, target, info, extra; };
 
 static Vbpx_chip* top;
 static u64 chip_cycles = 0;
-static void tick() { top->clk = 1; top->eval(); top->clk = 0; top->eval(); chip_cycles++; }
+static int req = 0, uio = 0x10;
+
+// ------------------------------------------------------------------ background control port (concurrent with requests)
+// A queue of pin steps for CSn (0x10), SCK (0x20) and MOSI (0x40), advanced by every clock, so that control-port
+// transactions overlap requests.  Each SCK phase lasts PH clocks (the minimum of the specification).  Every word
+// leaves two marks with the request counters: for a read word at the SCK fall that takes the word and at its first
+// rise; for a written word at its last rise and one phase later.
+struct BgStep { unsigned char pins, clocks, flags; };          // flags: 1 sample MISO, 2 end of word, 4 mark
+struct BgMark { u64 acked, started; };
+static const int PH = 4;
+static std::vector<BgStep> bgq; static size_t bgp = 0; static int bgl = 0;
+static std::vector<BgMark> bg_marks; static std::vector<u32> bg_words; static u32 bg_w = 0;
+static u64 n_started = 0, n_acked = 0;
+static bool bg_busy() { return bgp < bgq.size() || bgl > 0; }
+static void bg_tick() {
+    while (bgl == 0) {
+        if (bgp >= bgq.size()) return;
+        BgStep& s = bgq[bgp++];
+        if (s.flags & 1) bg_w = (bg_w << 1) | ((top->uo_out >> 7) & 1);
+        if (s.flags & 2) { bg_words.push_back(bg_w & 0xffff); bg_w = 0; }
+        if (s.flags & 4) bg_marks.push_back({n_acked, n_started});
+        uio = (uio & ~0x70) | s.pins; top->uio_in = uio | (req << 7);
+        bgl = s.clocks;
+    }
+    bgl--;
+}
+static void bg_add(int pins, int clocks, int flags = 0) { bgq.push_back({(unsigned char)pins, (unsigned char)clocks, (unsigned char)flags}); }
+static void bg_xfer(int addr, bool wr, const u32* v, int n) {
+    bg_add(0, 4);
+    u32 cmd = (wr ? 0x80 : 0) | addr;
+    for (int i = 7; i >= 0; i--) { int m = ((cmd >> i) & 1) << 6; bg_add(m, PH); bg_add(m | 0x20, PH); }
+    for (int k = 0; k < n; k++) {
+        for (int i = 15; i >= 0; i--) {
+            int m = wr ? ((v[k] >> i) & 1) << 6 : 0;
+            bg_add(m, PH, (!wr && i == 15) ? 4 : 0);
+            bg_add(m | 0x20, PH, (wr ? 0 : 1) | ((wr ? i == 0 : i == 15) ? 4 : 0));
+        }
+        bg_add(0, 0, 2 | (wr ? 4 : 0));
+    }
+    bg_add(0, 4); bg_add(0x10, 6);
+}
+static void tick() { bg_tick(); top->clk = 1; top->eval(); top->clk = 0; top->eval(); chip_cycles++; }
 
 static u32 fold(u64 v, int inb, int outb) { v &= (inb >= 64 ? ~0ull : ((1ull << inb) - 1)); u32 r = 0; while (v) { r ^= (u32)(v & ((1u << outb) - 1)); v >>= outb; } return r; }
 static u32 fold_id(u32 pc) { return fold((u64)(pc >> 2), 30, 10); }
 
 // ------------------------------------------------------------------ pins
 static int K = 8;
-static int req = 0, uio = 0x10;
 static FILE* oplog = nullptr;
 static u64 n_req = 0, lat_sum = 0, lat_max = 0, late = 0;
 static u64 lat_hist[16];
@@ -98,12 +138,56 @@ static void wait_ready() {
     for (int k = 0; k < 4; k++) tick();
 }
 // plays the steps written by model/randgen.py; one latency byte per request goes to latpath
-static int rand_play(const char* path, const char* latpath) {
-    FILE* f = fopen(path, "r"); FILE* lf = latpath ? fopen(latpath, "wb") : nullptr;
+// Background jobs (lines "X ..." of the steps file) run while the requests go on; what they read is written to
+// the log with the window of requests it may reflect, and cosim/conc_check.py compares it with the model.
+static char bg_kind = 0; static int bg_a = 0, bg_b = 0, bg_c = 0;
+static u64 bg_jobs = 0, bg_dropped = 0;
+static void bg_idle() { int n = 0; while (bg_busy()) { tick(); if (++n > 100000) { fprintf(stderr, "control port stuck\n"); exit(3); } } }
+static u64 lo2(u64 a) { return a > 2 ? a - 2 : 0; }
+static void bg_flush(FILE* cl) {
+    if (!bg_kind) return;
+    std::vector<BgMark>& m = bg_marks; std::vector<u32>& w = bg_words;
+    if (cl) {
+        if (bg_kind == 'S' || bg_kind == 'C') {
+            fprintf(cl, "%c %llu %llu %llu %llu", bg_kind, (unsigned long long)lo2(m[0].acked), (unsigned long long)m[3].started,
+                    (unsigned long long)lo2(m[2].acked), (unsigned long long)m[5].started);
+            for (int k = 1; k <= 12; k++) fprintf(cl, " %u", w[k]);
+            fprintf(cl, "\n");
+        } else if (bg_kind == 'D') {
+            fprintf(cl, "D %d %d %d", bg_a, bg_b, bg_c);
+            for (int k = 1; k <= bg_c; k++) fprintf(cl, " %llu %llu %u", (unsigned long long)lo2(m[2 * (k - 1)].acked), (unsigned long long)m[2 * k + 1].started, w[k]);
+            fprintf(cl, "\n");
+        } else if (bg_kind == 'I') {
+            fprintf(cl, "I %llu %llu %u %u\n", (unsigned long long)lo2(m[0].acked), (unsigned long long)m[3].started, w[0], w[1]);
+        } else fprintf(cl, "W\n");
+    }
+    bg_kind = 0; bg_marks.clear(); bg_words.clear(); bgq.clear(); bgp = 0; bg_jobs++;
+}
+static int rand_play(const char* path, const char* latpath, const char* clpath) {
+    FILE* f = fopen(path, "r"); FILE* lf = latpath ? fopen(latpath, "wb") : nullptr; FILE* cl = clpath ? fopen(clpath, "w") : nullptr;
     if (!f) { fprintf(stderr, "cannot open %s\n", path); return 2; }
     char c; u64 line = 0, nr = 0, bad = 0, sbad = 0, dbad = 0, nstat = 0, ndump = 0, nw = 0;
     while (fscanf(f, " %c", &c) == 1) {
         line++;
+        if (c == 'X') {
+            char k; int a = 0, b = 0, n = 0;
+            if (fscanf(f, " %c", &k) != 1) return 2;
+            if (k == 'D' && fscanf(f, "%d %d %d", &a, &b, &n) != 3) return 2;
+            if (k == 'W' && fscanf(f, "%d %d", &a, &b) != 2) return 2;
+            if (k == 'W') bg_idle();                         // a raw write is part of the model's state: never dropped
+            if (bg_busy()) { bg_dropped++; continue; }
+            bg_flush(cl);
+            bg_kind = k; bg_a = a; bg_b = b; bg_c = n;
+            u32 z[12] = {0}, v;
+            if (k == 'S' || k == 'C') { v = k == 'C' ? 0x0010 : 0x0008; bg_xfer(0x02, true, &v, 1); bg_xfer(0x03, false, z, 12); }
+            else if (k == 'D') { v = 0x8000 | (a << 8) | b; bg_xfer(0x0f, true, &v, 1); for (int i = 0; i < n; i++) bg_xfer(0x10, false, z, 1); }
+            else if (k == 'I') bg_xfer(0x00, false, z, 2);
+            else if (k == 'W') { v = 0x3000 | a; bg_xfer(0x0f, true, &v, 1); v = b; bg_xfer(0x10, true, &v, 1); }
+            else return 2;
+            continue;
+        }
+        if (c == 'J') { bg_idle(); continue; }
+        if (c != 'R') bg_idle();                             // the foreground control port needs the pins
         if (c == 'R') {
             int op, id, exp, gap, setup;
             if (fscanf(f, "%d %d %d %d %d", &op, &id, &exp, &gap, &setup) != 5) return 2;
@@ -112,9 +196,10 @@ static int rand_play(const char* path, const char* latpath) {
             drive(id & 0xff);
             for (int k = 0; k < setup; k++) tick();
             int ack0 = top->uo_out & 1;
-            req ^= 1; drive(id & 0xff);
+            req ^= 1; drive(id & 0xff); n_started++;
             int n = 0;
             while ((top->uo_out & 1) == ack0) { tick(); if (++n > 200) { fprintf(stderr, "line %llu: no acknowledge\n", (unsigned long long)line); return 3; } }
+            n_acked++;
             int got = ((top->uo_out >> 1) & 1) | (((top->uo_out >> 2) & 1) << 1);
             if (op != 0 && got != exp) { if (!bad) fprintf(stderr, "line %llu: op %d id %d reply %d, model %d\n", (unsigned long long)line, op, id, got, exp); bad++; }
             if (lf) fputc(n > 255 ? 255 : n, lf);
@@ -148,7 +233,9 @@ static int rand_play(const char* path, const char* latpath) {
             ndump++;
         } else return 2;
     }
+    bg_idle(); bg_flush(cl);
     if (lf) fclose(lf);
+    if (cl) { fclose(cl); printf("background_jobs=%llu dropped=%llu ", (unsigned long long)bg_jobs, (unsigned long long)bg_dropped); }
     printf("requests=%llu reply_mismatches=%llu stat_checks=%llu stat_mismatches=%llu state_dumps=%llu state_word_mismatches=%llu control_writes=%llu chip_clocks=%llu\n",
            (unsigned long long)nr, (unsigned long long)bad, (unsigned long long)nstat, (unsigned long long)sbad, (unsigned long long)ndump, (unsigned long long)dbad,
            (unsigned long long)nw, (unsigned long long)chip_cycles);
@@ -163,9 +250,9 @@ int main(int argc, char** argv) {
         for (int i = 0; i < 8; i++) tick();
         top->rst_n = 1;
         wait_ready();
-        return rand_play(argv[2], argc > 3 ? argv[3] : nullptr);
+        return rand_play(argv[2], argc > 3 ? argv[3] : nullptr, argc > 4 ? argv[4] : nullptr);
     }
-    if (argc < 4) { fprintf(stderr, "usage: cosim prog.evt prog.text drive [K] [oplog]  |  cosim --rand steps.ops [latency.bin]\n"); return 2; }
+    if (argc < 4) { fprintf(stderr, "usage: cosim prog.evt prog.text drive [K] [oplog]  |  cosim --rand steps.ops [latency.bin] [background.log]\n"); return 2; }
     int drv = atoi(argv[3]);
     if (argc > 4) K = atoi(argv[4]);
     if (argc > 5) oplog = fopen(argv[5], "wb");

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Constrained-random operations with expected results from the golden model (spec VR-01, VR-02).
 
-  randgen.py <operations> <seed> <out.ops> <out.meta>
+  randgen.py <operations> <seed> <out.ops> <out.meta> [conc]
 
 out.ops is played against the RTL by `cosim --rand` (cosim/cosim.cpp), one line per step:
   R op id expected gap setup     a request; expected = PRED | CONF<<1; gap = idle clocks before it; setup = clocks
@@ -9,6 +9,14 @@ out.ops is played against the RTL by `cosim --rand` (cosim/cosim.cpp), one line 
   W addr value                   a control-port write (CTRL or CMD)
   S / C  resolved m0 m1 m2 m3 errors flags queue     snapshot (S) or snapshot-and-clear (C), then compare
   D space count w...             read `count` raw words of a state space and compare (FR-10)
+With `conc` the control port works while the requests run (FR-10 during a live run): no foreground statistics
+steps; instead background jobs that `cosim --rand` starts and does not wait for (dropped if one is still running):
+  X S / X C                      snapshot / snapshot-and-clear, then read STATUS, ERRCNT and the ten statistics words
+  X D space addr count           raw read of `count` entries
+  X I                            read ID and CTRL
+  X W addr value                 raw write of a bimodal+chooser entry that no branch in use maps to (never dropped)
+  J                              wait for the background job to finish
+What the jobs read is checked by cosim/conc_check.py.
 out.meta has one line per R with what the model did, for the functional coverage (cosim/coverage.py).
 """
 import random
@@ -56,6 +64,7 @@ class Cov(bpx1.Bpx1):
 
 def main():
     N, seed = int(sys.argv[1]), int(sys.argv[2])
+    conc = len(sys.argv) > 5 and sys.argv[5] == "conc"
     rng = random.Random(seed)
     ops = open(sys.argv[3], "w")
     meta = open(sys.argv[4], "w")
@@ -124,6 +133,8 @@ def main():
             mode = rng.choice([0, 0, 0, 1, 2, 3])        # 0 mixed, 1 predict-heavy (fills the queue), 2 trace-like, 3 fast mixed
             left = rng.randint(20, 400)
             if rng.random() < 0.02:
+                if conc:
+                    ops.write("J\n")
                 ids = [rng.randrange(1024) for _ in range(rng.choice([8, 48, 200]))]
         left -= 1
         r = rng.random()
@@ -131,6 +142,8 @@ def main():
             m.drive = rng.choice([0, 0, 0, 1, 2, 3, 4])
             m.frozen = rng.random() < 0.15
             ops.write(f"W 1 {m.drive | (8 if m.frozen else 0)}\n")
+            continue
+        if conc and r < 0.0025:
             continue
         if r < 0.0025:
             stat_line("C" if (clear_ok and rng.random() < 0.3) else "S")
@@ -143,6 +156,31 @@ def main():
         if r < 0.00275:
             ops.write("W 2 2\n")                         # clear predictors
             m.clear_predictors()
+            continue
+        if conc and r < 0.00283:
+            continue
+        if conc and r < 0.025:
+            c = m.cfg
+            k = rng.choice("SSCCDDDDDWWI")
+            if k == "D":
+                sp = rng.choice([0, 0, 1, 1, 2, 3, 4, 7])
+                if sp == 7:
+                    a, cnt = rng.choice([(0, 1), (0, 2), (1, 1), (4, 1)])
+                else:
+                    size = c.NB if sp == 0 else c.NG if sp == 1 else c.tagged[sp - 2][0]
+                    cnt = rng.randint(1, 6)
+                    a = m._lookup(rng.choice(ids), m.ch).bi if (sp == 0 and rng.random() < 0.7) else rng.randrange(size)
+                    a = min(a, size - cnt)
+                ops.write(f"X D {sp} {a} {cnt}\n")
+            elif k == "W":
+                used = {m._lookup(i, 0).bi for i in ids} | {m._lookup(q["id"], 0).bi for q in m.queue}
+                free = [a for a in range(c.NB) if a not in used]
+                if free:
+                    a, v = rng.choice(free), rng.randrange(16)
+                    m.bim[a], m.cho[a] = v & 3, v >> 2
+                    ops.write(f"X W {a} {v}\n")
+            else:
+                ops.write(f"X {k}\n")
             continue
         if r < 0.0028 and clear_ok:
             ops.write("W 2 4\n")                         # clear statistics
@@ -171,10 +209,16 @@ def main():
             req(bpx1.OP_SPECIAL, bpx1.SUB_FLUSH | (rng.randrange(256) << 2), fast)
         else:
             req(bpx1.OP_SPECIAL, bpx1.SUB_NOP | (rng.randrange(256) << 2), fast)
-    stat_line("S")
-    drain()
-    dump()
-    stat_line("S")
+    if conc:
+        ops.write("J\n")
+        drain()
+        dump()
+        ops.write("X S\nJ\n")
+    else:
+        stat_line("S")
+        drain()
+        dump()
+        stat_line("S")
     print(f"{n} operations, seed {seed}: {m.stats()}")
 
 

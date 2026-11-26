@@ -292,6 +292,18 @@ class Bpx1:
                     ua=self.ua, lfsr=self.lfsr, ch=self.ch, sh=self.sh, queue=[dict(q) for q in self.queue],
                     drive=self.drive, frozen=self.frozen)
 
+    def raw(self, space: int, addr: int) -> int:
+        """The word the control port's raw access reads at (space, addr) (docs/SPEC.md section 4)."""
+        c = self.cfg
+        if space == 0:
+            return self.bim[addr] | (self.cho[addr] << 2)
+        if space == 1:
+            return self.gsh[addr]
+        if space == 7:
+            return [self.ch & 0xfff, self.ch >> 12, self.sh & 0xfff, self.sh >> 12, self.ua | (self.lfsr << 4)][addr]
+        tag, ctr, u = self.tt[space - 2][addr]
+        return (u << (c.tagged[space - 2][1] + 3)) | (tag << 3) | ctr
+
 
 def fold_id(pc: int, W: int = 10) -> int:
     """Host-side fold of a branch address into the identifier (IR-05)."""

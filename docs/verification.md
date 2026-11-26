@@ -8,6 +8,7 @@ session that wrote this file, on the RTL of the commit that contains it; the com
 | Requirement | Evidence | Result |
 | --- | --- | --- |
 | VR-01 golden model, bit-exact | 71 programs × (CPU in-flight run + one-in-flight replay), every request replayed through `model/bpx1.py`; 10 × 100,000 constrained-random operations with statistics and full-state comparison | **0 mismatches** in 280,336,456 program requests and 1,000,134 random requests **(VERIFIED)** |
+| FR-10 in a live run (U4) | section 2a: control port working while requests run, 10 × 100,000 operations | 8,300 background jobs (snapshots, snapshot-and-clears, raw reads and writes), 11,680 checked values, **0 mismatches**; replies and final state still equal the model; the reverted deadlock fix is caught in 4 of 4 runs **(VERIFIED)** |
 | VR-02 functional coverage | `docs/coverage.md`, `docs/coverage_bins.md` | 52 of 52 reachable bins of the required cross, 90 of 90 other bins **(VERIFIED)**; 16 cross bins excluded, each by a formal assertion |
 | VR-03 formal | section 4 | all assertions proven by k-induction (unbounded) and checked by BMC to 60 clocks; 12 cover traces **(VERIFIED)**; found two defects in the RTL, both fixed |
 | VR-04 gate level | CI job `gl_test` on the built netlist; `tools/harden.sh` locally | passes **(VERIFIED by CI)** |
@@ -41,6 +42,32 @@ misprediction counts (82 and 82 on `team.interpreter`, 70,648 and 70,648 on `sor
 their pseudo-random sequence at different moments (67 against 65, 70,499 against 70,529) **(VERIFIED)**. So the
 difference is noise between two equally valid random sequences, not a loss in the RTL. The exploration numbers of
 docs/exploration.md differ from the RTL numbers by that much; the RTL numbers are the ones to quote.
+
+## 2a. The control port during a live run (FR-10, U4)
+
+`CONC=1 bash cosim/random.sh` runs the same random requests with the control port working **at the same time**:
+the harness has a second, independent SPI driver that advances with every clock (`cosim/cosim.cpp`, background
+control port; SCK at the fastest rate the specification allows, 8 clocks per bit). The generator
+(`model/randgen.py conc`) starts background jobs without waiting for them:
+
+| Job | What is checked (`cosim/conc_check.py`) |
+| --- | --- |
+| Snapshot, snapshot-and-clear, then 12 words read | The five counters, added up over all snapshot-and-clear steps, equal the model's running totals after one whole number of requests inside the window in which the snapshot was taken: consistent, nothing lost, nothing counted twice. ERRCNT and the flags lie between their values at the ends of the window. |
+| Raw read of 1 to 6 entries of any table, or of the small registers | Each word equals the model's entry after some whole number of requests inside its window: never a half-written value. (The speculative history is left out: it changes inside a request.) |
+| Raw write of a bimodal+chooser entry no branch in use maps to | Never dropped; the model applies it too; the state dumps and replies that follow prove it landed once and disturbed nothing. |
+| ID and CTRL read | Exact. |
+
+The window of a word is from two requests before the last one acknowledged when the chip fetched it, to the last
+one started: typically 2 to 20 requests. Replies, and the complete state at every dump, are still compared exactly.
+
+Result, 10 runs of 100,000 operations, final RTL **(VERIFIED)**: 1,000,096 requests, 0 reply mismatches, 1,308
+state dumps with 0 differing words; 8,300 background jobs completed (14,337 more were requested while one was
+running and dropped): 869 snapshots, 961 snapshot-and-clears, 2,316 raw reads (7,572 words), 3,706 raw writes, 448
+ID reads; 11,680 checks, **0 mismatches**.
+
+Two tests of the test **(VERIFIED)**: with the deadlock fix of section 4 reverted, 4 of 4 runs stop with "no
+acknowledge" within 26,000 steps, so this simulation would have found the deadlock; and one flipped bit in a logged
+raw word, or a snapshot count off by one, is reported.
 
 ## 3. System co-simulation (VR-06)
 
@@ -161,7 +188,6 @@ file; its CI run is the sign-off for them (docs/HANDOVER.md, next steps).
 | Item | Why it is open |
 | --- | --- |
 | A request withdrawn before its acknowledge is covered by formal only | The golden model has no notion of it; the chip counts it as misuse. |
-| Control-port commands in the same clock as a request are covered by formal only | Random simulation alternates them. This is the gap the deadlock went through; a concurrent-SPI mode of `cosim --rand` would close it in simulation too. |
 | microcotb port of the tests, and the host code on real hardware | docs/bringup.md. |
 
 ## 8. Commands
@@ -170,6 +196,7 @@ file; its CI run is the sign-off for them (docs/HANDOVER.md, next steps).
 bash cosim/run.sh ; python3 cosim/report.py                      # 71 programs, one request per cycle -> docs/cosim.md
 BPX_DUAL=1 OUT=out/cosim_dual bash cosim/run.sh 16 ; python3 cosim/report.py out/cosim_dual   # -> docs/cosim_dual.md
 bash cosim/random.sh 10 100000                                   # random operations and coverage
+CONC=1 bash cosim/random.sh 10 100000                            # the same with the control port working concurrently
 bash formal/run.sh prove ; bash formal/run.sh bmc ; bash formal/run.sh cover ; bash formal/run.sh nowait ; bash formal/run.sh bmcfull
 cd test && make -B -f Makefile.bpx [BEHAV=yes] OPS=6000 SEED=11  # cocotb, latch cells or flip-flop model
 ```
