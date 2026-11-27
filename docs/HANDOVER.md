@@ -22,8 +22,8 @@ mismatches, coverage 295/295, 20 of 20 mutants caught, every formal task passing
 +3.53 ns at the slow corner, DRC/LVS/antenna 0, gate level 6 passed + 5 skipped) **(VERIFIED, progress log,
 mosaic.md 9, step 5)**. The commits after it add documents, the fault-campaign simulator (`explore/`) and the
 review fix-ups (tests, formal properties, scripts, host library; mosaic.md 9, step 6); the synthesised netlist of
-`src/` is byte-identical to that of `69d0bf4` and no flow setting changed **(VERIFIED, step 6)**. **Open, the lead's next step:** merge `mosaic` to `main`, tag it, and read the CI of `main`.
-Until then `main` stays at the perceptron design (tag `g3-perceptron`).
+`src/` is byte-identical to that of `69d0bf4` and no flow setting changed **(VERIFIED, step 6)**. On 27 Nov 2026 the lead ran an own check (the three cocotb suites and random regressions from a fresh sync, five own mutants, all caught), had the round reviewed independently (no blocker; fix-ups in mosaic.md 9), then merged `mosaic` to `main` and tagged it **`g3-mosaic`**. The CI of `main` is read on the repository's Actions page; it is not recorded in this file.
+The perceptron design before this round is the tag `g3-perceptron`.
 
 ## 2. Where things are
 
@@ -40,8 +40,8 @@ Until then `main` stays at the perceptron design (tag `g3-perceptron`).
 
 | Name | What |
 | --- | --- |
-| `main` | the perceptron design, tag `g3-perceptron`, until the mosaic is merged (open) |
-| `mosaic` | the mosaic, steps 2–5 (`08ac75f`, `2837285`, `ca279c9`, `f78ae8f`, final `69d0bf4`), then the merges of `docs-final` and `campaign` and this document pass; to be merged to `main` and tagged (open) |
+| `main` | the mosaic, tag `g3-mosaic` (the perceptron design before it is tag `g3-perceptron`) |
+| `mosaic` | the mosaic, steps 2–5 (`08ac75f`, `2837285`, `ca279c9`, `f78ae8f`, final `69d0bf4`), then the merges of `docs-final` and `campaign` and this document pass; merged to `main` and tagged `g3-mosaic` on 27 Nov 2026 |
 | `probe-leaky` | probe: one 16 × 8 table of floating-node cells (`b428b21`); never for `main` |
 | `probe-ro` | probe: two ring oscillators of named cells, divider, entropy bit (`67eaabd`); never for `main`; its ring A is the mosaic's ring, twice |
 | `campaign` | pre-silicon fault-injection campaign and coset-mask comparison (`fe62aa8`, `4041870`); merged into `mosaic` (simulator, runner, results under `explore/`); `docs/fault_campaign.md` is the corrected copy from `docs-final` |
@@ -50,6 +50,7 @@ Until then `main` stays at the perceptron design (tag `g3-perceptron`).
 | tag `g3-tage` | tagged-table design, verified to G3: the fallback |
 | tag `g3` | the same RTL with the last test harness of that design |
 | tag `g3-perceptron` | the perceptron design, CI green on `793a339` |
+| tag `g3-mosaic` | the mosaic: `main` after the merge of 27 Nov 2026 |
 
 Repository layout: `src/` RTL (`bpx_ro.v` the ring oscillators, `bpx.sdc` the timing exception); `model/` golden
 model, random-test generator, replay; `test/` cocotb (CI); `cosim/` Verilator harness, reports, coverage,
@@ -117,8 +118,8 @@ the reports and generated documents back. Destroy the machine when idle.
 | Speedup and accuracy (RTL) | 1.1307× / 90.93 % (two requests per cycle 1.1345×; safe mode 1.1249× / 89.06 %) **(VERIFIED: docs/cosim*.md)** |
 | Pre-silicon fault campaign | done **(VERIFIED, fault_campaign.md: 61 and 51 minutes on the owner's PC)** |
 | Review fix-ups (step 6): canary halves tested one at a time, soft reset with the strap pins true, MASK staging rule in a plain run, formal covers (watchdog count 12, the strapped clear) and a non-tautological strap assertion, cosim rebuild rule, host reset | the three reviewer mutants now caught; prove, cover, nowait pass; cocotb 13/13 in each of three ways; random 4 × 50,000 plain and concurrent 0 mismatches **(VERIFIED, mosaic.md 9 step 6)** |
-| CI of `mosaic` | `2837285`, `ca279c9`: gds, test, docs success; `69d0bf4`: test and docs success, gds still running when last read **(VERIFIED, public GitHub API)**; gds of `69d0bf4` and the CI of the step-6 commit: open (the lead reads them) |
-| Merge to `main`, tag, CI of `main` | open: the lead's next step |
+| CI of `mosaic` | `2837285`, `ca279c9`: gds, test, docs success; `69d0bf4`: test and docs success, gds still running when last read **(VERIFIED, public GitHub API)**; gds of `69d0bf4` (jobs gds, precheck, gl_test, viewer) succeeded in 46 minutes **(VERIFIED by the lead, Actions page)**; the CI of the later commits is on the Actions page |
+| Merge to `main`, tag | done 27 Nov 2026, tag `g3-mosaic`; CI of `main`: Actions page |
 
 ## 5. Verified facts worth not rediscovering
 
@@ -146,7 +147,7 @@ the reports and generated documents back. Destroy the machine when idle.
 ## 6. Next steps, in order
 
 1. Record the rented machine's spend and its destruction (section 8).
-2. Merge `mosaic` to `main`, tag it, and check that every CI job of `main` succeeds (open).
+2. Merged to `main` and tagged `g3-mosaic` (27 Nov 2026). Check that every CI job of `main` succeeds before submitting.
 3. Tell the FPGA team: the statistics offload (D30), the strap combination and what to drive during reset
    (bringup.md), 33 ns, and `docs/experiments.md`.
 4. Open the demo-board schematic PDF to settle the header pins for `clk`/`rst_n` (bringup.md 6).
@@ -180,7 +181,9 @@ python3 explore/fault_campaign.py ...                    # fault campaign (fault
 Vast.ai: up to $12 in total; machines labelled `bpx1-*`; never touch others (`fsk-*`); destroy when idle; report
 the spend at every gate. Spent before this round: about $1.40 **(ESTIMATED from run times)**. This round: the
 92-CPU build machine (D32), label `bpx1-fast`, $0.709 per hour **(VERIFIED by the lead's report)**.
-Its spend and its destruction (instance list): TBD(lead).
+It ran from 01:57 to 04:34 on 27 Nov 2026 (UTC+2), 2.6 hours, about $1.86 **(ESTIMATED: price × hours, the billing
+page was not read)**, and was destroyed by the lead; the instance list then showed no `bpx1-*` machine **(VERIFIED
+by the lead: `vastai show instances` after the destroy)**. Total for the project: about $3.3 of the $12 **(ESTIMATED)**.
 
 ## 9. Risks
 
