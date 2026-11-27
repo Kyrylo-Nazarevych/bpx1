@@ -10,10 +10,11 @@ a **mosaic of dependability experiments**: a leaky twin of one weight table with
 selector, canary flops, invariant checkers and a watchdog, demotion to the tournament, gshare randomness, two ring
 oscillators and a reset strap. All are off after reset; then every predictor is its plain, verified version.
 
-**Status: the mosaic round is verified and built on branch `mosaic` (`69d0bf4`): 0 mismatches against the golden
-model in the full regression, a clean build at 33 ns (80.92 % utilisation, +3.53 ns at the slow corner). Merging it
-to `main` and tagging it are the next step.** Until then `main` holds the verified perceptron design (tag
-`g3-perceptron`); the tagged-table design is the tag `g3-tage` (the fallback). Start with `docs/HANDOVER.md`.
+**Status: submitted to the Tiny Tapeout TTSKY26d shuttle as a 2×2 project (revision at commit `89312af`, tag
+`g3-mosaic`).** The mosaic round is verified: 0 mismatches against the golden model in the full regression, a clean
+build at 33 ns (80.92 % utilisation, +3.53 ns at the slow corner), CI green on `main`. Earlier designs: the verified
+perceptron design is the tag `g3-perceptron`; the tagged-table design is the tag `g3-tage` (the fallback). Start with
+`docs/HANDOVER.md`.
 
 | Where | What |
 | --- | --- |
