@@ -1,0 +1,20 @@
+plain run: 71 programs, 69 in the aggregates
+default predictor, mean accuracy over the 69 programs: 90.9322 % (CPU model), 90.9376 % (one in flight)
+  bimodal    86.4660 % (stand-alone kind)
+  gshare     87.2862 % (stand-alone kind)
+  tournament 88.9192 % (stand-alone kind)
+one in flight: the four predictions from the chip's one state equal the stand-alone predictors on every program: True []
+  CPU model, bimodal observed beside the driving default: 86.4541 %; minus stand-alone (driving) per program: min -25 max 2376 sum 2982 (it trains at the default's timing)
+  CPU model, gshare observed beside the driving default: 87.2860 %; minus stand-alone (driving) per program: min -799 max 929 sum -228 (it trains at the default's timing)
+  CPU model, tournament observed beside the driving default: 88.9190 %; minus stand-alone (driving) per program: min -219 max 150 sum -33 (it trains at the default's timing)
+twin on without decay, 8 modes driving x 71 programs: all counts equal the plain run, all flags 0: True []
+TWIN_USE off with decay (e1e3pm, l1e2p0+e1e4p1): all counts equal the plain run; twin driving vs its shadow in a run the static default drives, one in flight: mispredictions, flags and the other predictors equal: True []
+twin driving in the CPU model, (driving - shadow) default mispredictions over 568 runs (8 modes x 71): sum |.| 813, net -345, max |.| 53; sum of |driving - plain| 3086373: the timing feedback the shadow leaves out
+  C0 R0: mean over 69 programs of (driving - shadow) per 1000 branches -0.0013, of (driving - plain) +11.3700
+  C0 R1: mean over 69 programs of (driving - shadow) per 1000 branches -0.0007, of (driving - plain) +11.3861
+  C1 R0: mean over 69 programs of (driving - shadow) per 1000 branches -0.0024, of (driving - plain) +9.0090
+  C1 R1: mean over 69 programs of (driving - shadow) per 1000 branches -0.0024, of (driving - plain) +8.9689
+  C2 R0: mean over 69 programs of (driving - shadow) per 1000 branches -0.0000, of (driving - plain) +8.6792
+  C2 R1: mean over 69 programs of (driving - shadow) per 1000 branches -0.0003, of (driving - plain) +6.8198
+  C3 R0: mean over 69 programs of (driving - shadow) per 1000 branches -0.0020, of (driving - plain) +6.2773
+  C3 R1: mean over 69 programs of (driving - shadow) per 1000 branches -0.0025, of (driving - plain) +6.2479

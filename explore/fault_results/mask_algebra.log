@@ -1,0 +1,9 @@
+code words: 00 E1 D2 33 B4 55 66 87 78 99 AA 4B CC 2D 1E FF
+mask 00: weight 0, code word True, syndrome 0, distance to code 0; nodes 00 -> word 00: C0 w=0, C1 w=0, C2 w=0, C3 w=0; nodes FF -> word FF: C0 w=-1, C1 w=-1, C2 w=-1, C3 w=-1
+mask 03: weight 2, code word False, syndrome 3, distance to code 2; nodes 00 -> word 03: C0 w=3, C1 w=3, C2 abstain, C3 abstain; nodes FF -> word FC: C0 w=-4, C1 w=-4, C2 abstain, C3 abstain
+mask 30: weight 2, code word False, syndrome 3, distance to code 2; nodes 00 -> word 30: C0 w=0, C1 w=0, C2 abstain, C3 abstain; nodes FF -> word CF: C0 w=-1, C1 w=-1, C2 abstain, C3 abstain
+mask 21: weight 2, code word False, syndrome C, distance to code 2; nodes 00 -> word 21: C0 w=1, C1 w=1, C2 abstain, C3 abstain; nodes FF -> word DE: C0 w=-2, C1 w=-2, C2 abstain, C3 abstain
+mask 01: weight 1, code word False, syndrome E, distance to code 1; nodes 00 -> word 01: C0 w=1, C1 abstain, C2 w=0 (corrected), C3 abstain; nodes FF -> word FE: C0 w=-2, C1 abstain, C2 w=-1 (corrected), C3 abstain
+mask 0F: weight 4, code word False, syndrome F, distance to code 2; nodes 00 -> word 0F: C0 w=-1, C1 w=-1, C2 abstain, C3 abstain; nodes FF -> word F0: C0 w=0, C1 w=0, C2 abstain, C3 abstain
+mask F0: weight 4, code word False, syndrome F, distance to code 2; nodes 00 -> word F0: C0 w=0, C1 w=0, C2 abstain, C3 abstain; nodes FF -> word 0F: C0 w=-1, C1 w=-1, C2 abstain, C3 abstain
+mask 3C: weight 4, code word False, syndrome F, distance to code 2; nodes 00 -> word 3C: C0 w=-4, C1 w=-4, C2 abstain, C3 abstain; nodes FF -> word C3: C0 w=3, C1 w=3, C2 abstain, C3 abstain
