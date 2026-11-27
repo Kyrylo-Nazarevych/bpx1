@@ -1,9 +1,11 @@
 # BPX-1 pre-silicon fault-injection campaign
 
-Status: done, 26 Nov 2026, branch `campaign`; coset-mask follow-up in section 7 (27 Nov). The baseline that the silicon measurements are compared against:
+Status: done, 26 Nov 2026, branch `campaign`; coset-mask follow-up in section 7 (27 Nov), whose result is in the chip
+since mosaic step 5 (switchable mask CTRL[15], `8'hF0`). The baseline that the silicon measurements are compared against:
 predicted extra mispredictions per fault, per predictor and per protection mode. Every number below was run and
-read in this campaign **(VERIFIED)** unless marked otherwise. Raw results: `~/work/bpx1_fi/out/*.tsv` (WSL);
-aggregated tables and logs: `explore/fault_results/`. Runner: `explore/fault_campaign.py`; validation:
+read in this campaign **(VERIFIED)** unless marked otherwise; it ran on the owner's PC (61 and 51 minutes of wall
+time). Raw results: `~/work/bpx1_fi/out/*.tsv` (WSL); aggregated tables and logs: `explore/fault_results/` on branch
+`campaign`. Runner: `explore/fault_campaign.py`; validation:
 `explore/fault_validate.py`; injection, twin and decay model: `explore/bpsim.cc` (kind `gehlr`, options listed
 above `struct GehlRP`).
 
@@ -48,15 +50,15 @@ above `struct GehlRP`).
 in 3 clocks) and f the chip clock. In an experiment the host sets the branch rate, so c is usually larger: what
 counts is the time between resolves as the FPGA measures it.
 
-| τ (branches) | 33.3 MHz, 3 clk | 10 MHz, 3 clk | 1 MHz, 3 clk | host: one branch per 5 µs |
+| τ (branches) | 30.3 MHz (33 ns), 3 clk | 10 MHz, 3 clk | 1 MHz, 3 clk | host: one branch per 5 µs |
 | --- | --- | --- | --- | --- |
-| 1e2 | 9 µs | 30 µs | 0.3 ms | 0.5 ms |
-| 1e3 | 90 µs | 0.3 ms | 3 ms | 5 ms |
-| 1e4 | 0.9 ms | 3 ms | 30 ms | 50 ms |
-| 1e5 | 9 ms | 30 ms | 0.3 s | 0.5 s |
-| 1e6 | 90 ms | 0.3 s | 3 s | 5 s |
+| 1e2 | 10 µs | 30 µs | 0.3 ms | 0.5 ms |
+| 1e3 | 0.1 ms | 0.3 ms | 3 ms | 5 ms |
+| 1e4 | 1 ms | 3 ms | 30 ms | 50 ms |
+| 1e5 | 10 ms | 30 ms | 0.3 s | 0.5 s |
+| 1e6 | 0.1 s | 0.3 s | 3 s | 5 s |
 
-The estimated retention of 0.1–1 ms is τ ≈ 1.1e3–1.1e4 branches at 33 MHz and full speed, τ ≈ 20–200 branches for
+The estimated retention of 0.1–1 ms is τ ≈ 1e3–1e4 branches at 30.3 MHz and full speed, τ ≈ 20–200 branches for
 a host resolving one branch every 5 µs **(ESTIMATED: from the retention estimate of docs/mosaic.md 5)**.
 
 ## 2. Validation of the injection (done before any number was used)
@@ -210,7 +212,7 @@ CODE 0: 5.35 [1.52, 10.45]; parity: 3.57; SEC-DED: 3.54, with RESTORE **0.024** 
   rewritten before they decay (C3 R1 and C2 R1 at ≤ 0.2 per 1000 from τ = 1e3). With the exponential (memoryless)
   law, rewriting a word as read changes nothing, which is why RESTORE helps only CODE 2 there.
 - **Abstaining beats correcting** for mixed levels: always without RESTORE, and with RESTORE below τ ≈ 1e3 branches
-  (≈ 90 µs at 33 MHz; C2 R1 − C3 R0 = +3.4 [+0.2, +6.6] at τ = 1e2, −0.3 [−3.5, +2.3] at 1e3). With one-directional
+  (≈ 0.1 ms at 30.3 MHz; C2 R1 − C3 R0 = +3.4 [+0.2, +6.6] at τ = 1e2, −0.3 [−3.5, +2.3] at 1e3). With one-directional
   decay, correcting wins at every τ. Per faulty read, an abstention costs 0.010–0.022 mispredictions, a silent wrong
   weight (CODE 0) 0.022–0.049.
 - **Unidirectional decay defeats the code.** All-0 and all-1 words are code words of the (8,4) code (weights 0 and −1),
@@ -222,7 +224,7 @@ CODE 0: 5.35 [1.52, 10.45]; parity: 3.57; SEC-DED: 3.54, with RESTORE **0.024** 
 - **When the twin stops being worth using.** Against leaving W3 out at prediction (8.67): the best mode is better
   from τ ≈ 1e3 (C3 R0, −2.1 [−3.8, −0.8]), C2 R1 from τ ≈ 3e3; CODE 0 needs τ ≥ 1e6. Against a 3-table design
   (4.02): the twin with C2 R1 is better from τ ≈ 3e4 (mixed) or 3e3 (one-directional decay). So with the estimated
-  retention (τ ≈ 1e3–1e4 at 33 MHz, far less at a slow host), a leaky fourth table with SEC-DED and restore is
+  retention (τ ≈ 1e3–1e4 at 30.3 MHz, far less at a slow host), a leaky fourth table with SEC-DED and restore is
   roughly break-even against the 3-table predictor and worth having only if retention is at the upper end or the
   branch rate is high.
 
@@ -230,7 +232,7 @@ CODE 0: 5.35 [1.52, 10.45]; parity: 3.57; SEC-DED: 3.54, with RESTORE **0.024** 
 
 | Number here | Silicon measurement |
 | --- | --- |
-| Part A per-fault cost (table × predictor) | FPGA raw-write injection at a known Poisson rate (≤ 1e-3 per resolved branch for the linear value), statistics counters of all four predictors, against a fault-free run of the same program and the same seed; at least 10 seeds × many programs (the per-program effect is heavy-tailed); the FPGA twin of the RTL gives the fault-free counts in lockstep |
+| Part A per-fault cost (table × predictor) | FPGA raw-write injection at a known Poisson rate (≤ 1e-3 per resolved branch for the linear value), mispredictions of all four predictors counted by the FPGA from the prediction pins (the chip itself counts only branches and the driving predictor's mispredictions: statistics offload, docs/HANDOVER.md D30), against a fault-free run of the same program and the same seed; at least 10 seeds × many programs (the per-program effect is heavy-tailed); the FPGA twin of the RTL gives the fault-free counts in lockstep |
 | Lifetime | the FPGA twin's state dump against the chip's after each injection (entry and whole state) |
 | Part B per mode | per CODE × RESTORE with TWIN_USE on: mispredictions against TWIN_USE off on the same run (event 10 gives the W3-only prediction per predict, so one run suffices), and TW_ERR/COR/DET/SDC as event counts on the DBG pins, per 1000 resolves |
 | τ | the branch rate (time between resolves) and the clock, to convert τ to seconds (section 1); sweep the clock or insert idle time to move along the τ axis; temperature logged |
@@ -254,8 +256,9 @@ CODE 0: 5.35 [1.52, 10.45]; parity: 3.57; SEC-DED: 3.54, with RESTORE **0.024** 
 
 ## 7. Coset mask for the twin's code (follow-up, 27 Nov 2026)
 
-**Idea.** The chip stores `codeword XOR MASK` on the floating nodes and XORs MASK back after the read (inverter
-polarities, no cells). A fully decayed word (nodes all 0 or all 1) then decodes as MASK or ~MASK, which is not a
+**Idea.** The chip stores `codeword XOR MASK` on the floating nodes and XORs MASK back after the read (a fixed mask
+would be inverter polarities, no cells; as built it is switchable, one flop and XORs on the four check bits).
+A fully decayed word (nodes all 0 or all 1) then decodes as MASK or ~MASK, which is not a
 code word if MASK is not. In bpsim: twin scenario suffix `k<hex>` (`e1e4pmkF0`); decay acts on the node values;
 the per-cell draws and decay seeds do not depend on the mask, so every mask sees the same chip.
 
@@ -360,8 +363,12 @@ and abstains under SEC-DED and detect-all.
 
 If the decay turns out to be one-directional and the chip is to run in its best mode (SEC-DED + restore) for the
 lowest misprediction rate rather than for truthful flags, MASK = 0x00 is better. Measuring the preferred level per
-cell on silicon (section 5) decides between them. Not done: the mask in the RTL and the model (a hardware change,
-outside this campaign's files); masks other than the eight listed.
+cell on silicon (section 5) decides between them. **Built since (mosaic step 5):** both are available on the chip:
+CTRL[15] MASK = 1 stores `code word ^ 0xF0`, MASK = 0 the plain code word; reset 0; in the RTL, the golden model and
+the host (docs/mosaic.md 7.7). A change of MASK invalidates the staging register, and words written under the other
+setting read as faulty until rewritten, so clear the predictors after switching. Not done: masks other than the
+eight listed.
+
 
 Cost of this follow-up: 11,756 s CPU (mask runs 6,444, log-normal and extra τ 4,334, no-decay check 439, twin flips
 539) plus about 300 s of model validation; 51 minutes of bpsim wall time at 4 threads, niced **(VERIFIED,
