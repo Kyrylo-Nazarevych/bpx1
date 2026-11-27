@@ -1,78 +1,95 @@
 # BPX-1 area (DR-03, XR-02, AL-02)
 
-All numbers **(VERIFIED)** from local LibreLane builds (same flow version as the CI); the result table is the
-build of the perceptron design (docs/perceptron.md) with its final parameters, 26 Nov 2026.
+Numbers from local LibreLane builds (same flow version as the CI; since the end of the mosaic round also from a
+rented machine with the same LibreLane 3.0.14 image, which reproduced the local step-4 build byte for byte). Steps
+of the mosaic round are **(VERIFIED, progress log)** = recorded in docs/mosaic.md section 9; figures of the final
+build are `TBD(final)`.
 
-## Result
+## Result (final mosaic build, 33 ns, statistics offload)
 
 | Quantity | Value |
 | --- | --- |
-| Core area | 72,565 µm² |
-| Standard cells, routed | 58,947 µm² |
-| Utilisation: LibreLane `design__instance__utilization` | 81.2 % |
-| Utilisation: Tiny Tapeout `--print-stats` | 80.2 % |
-| Sequential cells (1,232 table and snapshot latches, 97 latches of the write path, 472 flops) | 27,951 µm² |
-| Combinational cells | 23,889 µm² |
-| Timing-repair buffers | 4,288 µm² |
-| Clock tree | 930 µm² |
-| Growth from synthesised (54,112) to routed cell area | +9 % |
-| Wire length | 194 mm |
-| Routing DRC, Magic DRC, LVS, antenna | 0, 0, 0, 0 |
+| Core area | 72,565 µm² (unchanged) |
+| Standard cells, routed | TBD(final) |
+| Utilisation: LibreLane `design__instance__utilization` | TBD(final) (about 81 %, owners' report) |
+| Utilisation: Tiny Tapeout `--print-stats` | TBD(final) |
+| Timing-repair buffers | TBD(final) |
+| Routing DRC, Magic DRC, LVS, antenna | TBD(final) |
+| Floating-node cells (`einvp_1`) in the final netlist | TBD(final) (256 expected) |
+
+## Area history of the mosaic round
+
+| Design | Cells, routed | Utilisation | Outcome |
+| --- | --- | --- | --- |
+| `g3-perceptron` (start of the round) | 58,947 µm² | 81.2 % | clean, 30 ns |
+| Step 2: trims (4-bit weights, 8-bit sum, 8-bit path history, binarised inference removed) | 53,848 µm² | 74.2 % | clean |
+| Step 3: registers and the leaky twin | 59,891 µm² | 82.5 % | clean with `src/bpx.sdc` |
+| Step 4: pulse selector, canaries, checkers, watchdog, demotion | 61,204 µm² | 84.34 % | clean |
+| Step 5 with all five statistics counters | – | 86 % | routing did not converge **(VERIFIED by the owners' report)** |
+| Step 5 with the statistics offload (two counters) | TBD(final) | about 81 % (TBD(final)) | TBD(final) |
+
+The plan (mosaic.md 4) estimated additions of about 5,600 µm² and trims of about 3,300 µm², net about +2,300 µm²
+→ about 84 % **(ESTIMATED there)**; step 4 reached 84.34 % before the step-5 additions. The offload removes three
+of the five statistics counters with their snapshot latches.
 
 ## Area by block
 
-Synthesised area, Yosys with the repository's cell settings and the hierarchy kept **(VERIFIED, 26 Nov 2026)**:
+Synthesised area, Yosys with the repository's cell settings and the hierarchy kept; "–" = not recorded for that step.
 
-| Block | µm² | Share |
-| --- | --- | --- |
-| Perceptron: four weight tables, 32 × 5 bits each | 15,594 | 29 % |
-| Perceptron: the two sums (predict, and from the staging register for training) | 3,042 | 6 % |
-| Bimodal + chooser table, 64 × 4 bits | 6,350 | 12 % |
-| gshare table, 128 × 2 bits | 6,300 | 12 % |
-| Index hashes of all tables (identifier, outcome and path history folds) | 1,190 | 2 % |
-| Predictor: address multiplexers, training logic, threshold | 3,770 | 7 % |
-| Sequencer, in-flight queue, four history registers, statistics counters, raw access | 14,274 | 26 % |
-| Statistics snapshot latches | 1,204 | 2 % |
-| Write sequencer | 100 | 0.2 % |
-| Control port (SPI) | 1,886 | 3 % |
-| Synchronisers and pins | 404 | 1 % |
-| **Total synthesised** | **54,112** | |
+**Mosaic steps (VERIFIED, progress log):**
 
-Against the tagged-table design (48,250 synthesised, 75.6 % routed): the weight tables are 3,350 µm² larger than
-the three tagged tables, the two sums and the path history replace the tag comparators and the allocation logic,
-and the result is 5.6 points of utilisation more. Nothing had to be optimised to fit: the build routes clean at
-81 %. What is left is about 13,600 µm² of the core, of which a routable design can use perhaps a third (trial A
-below stopped at 83.8 %).
+| Block | Step 2 | Step 3 | Step 4 |
+| --- | --- | --- | --- |
+| Whole chip, synthesised | 49,406 | 55,991 | 57,003 |
+| Weight tables W0–W3 (32 × 4 bits each) | 4 × 3,237 | – | – |
+| The two sums | 2 × 1,107 | 2 × 1,358 | – |
+| Leaky twin W3L (256 `einvp_1` and its 32-way read tree) | – | 3,757 | – |
+| `bpx_pred` own logic | – | 4,593 | – |
+| `bpx_core` own logic | – | 14,697 | 15,283 (checkers, watchdog, demotion, flags, events) |
+| `bpx_canary` (four flops, two delay cells, two XORs) | – | – | 115 |
+| `bpx_wseq` (12 delay cells, tap multiplexer, `and3b`, three setting flops) | – | – | 410 |
+
+In hierarchical synthesis the unused second last-term adder of the staging sum is not removed (flattened it is).
+Step 5 (rings 2 × 137.6 µm² of cells, divider, LFSR, strap, mask, the offload) by block: TBD(final).
+
+**`g3-perceptron`, for reference (VERIFIED in that round):** total 54,112 µm²; four weight tables of 32 × 5 bits
+15,594 (29 %); the two sums 3,042; bimodal + chooser 6,350; gshare 6,300; index hashes 1,190; predictor multiplexers,
+training and threshold 3,770; sequencer, queue, histories, statistics, raw access 14,274; statistics snapshot latches
+1,204; write sequencer 100; SPI 1,886; synchronisers and pins 404.
 
 ## Flow settings that differ from the Tiny Tapeout template (AL-02), each with its evidence
 
 | Setting | Value | Why | Evidence | Fallback |
 | --- | --- | --- | --- | --- |
-| `SYNTH_EXCLUDED_CELL_FILE` | `src/synth_exclude_small.cells`: the PDK list minus its plain drive-strength-1 logic gates and flop (114 instead of 199 cells) | The template bars every `_1` gate from synthesis, which makes logic about 1.6× larger; the design does not fit without them | 57.0k → 49.9k µm² synthesised; builds B, C and the repository build clean | Default list, then cut logic or one tagged table |
+| `SYNTH_EXCLUDED_CELL_FILE` | `src/synth_exclude_small.cells`: the PDK list minus its plain drive-strength-1 logic gates and flop (114 instead of 199 cells) | The template bars every `_1` gate from synthesis, which makes logic about 1.6× larger | 57.0k → 49.9k µm² synthesised (trial builds) | Default list, then cut logic |
 | `PNR_EXCLUDED_CELL_FILE` | `src/pnr_exclude.cells`: the PDK list plus `clkdlybuf4s25/s50` | The resizer used these slow delay cells as fan-out buffers: about 1 ns each at the slow corner | Worst slow-corner path 24.7 → 21.7 ns; 1,500 µm² fewer buffers (trial B → C) | Default list |
 | `MAX_FANOUT_CONSTRAINT` | 16 (template: 10) | Fewer fan-out buffers on the wide nets of the tables | With the hold margins: repair buffers 9,915 → 5,645 µm² (trial A → B) | 10 |
-| `PL_/GRT_RESIZER_HOLD_SLACK_MARGIN` | 0.05 / 0.03 ns (template 0.1 / 0.05) | Fewer hold buffers | Hold met in all corners, worst slack +0.06 ns | Template values |
-| `PL_TARGET_DENSITY_PCT` | 84 (template 60) | The design needs 81 %; the target must be above it | Routed clean (5 detailed-routing passes to zero) | – |
-| `CLOCK_PERIOD` | 30 ns | See docs/timing.md | | |
+| `PL_/GRT_RESIZER_HOLD_SLACK_MARGIN` | 0.05 / 0.03 ns (template 0.1 / 0.05) | Fewer hold buffers | Hold met in all corners (step 4: +0.066 ns) | Template values |
+| `PL_TARGET_DENSITY_PCT` | 84 (template 60) | The design needs more than 80 %; the target must be above it | Routed clean at 84.34 % (step 4) | – |
+| `PNR_SDC_FILE`, `SIGNOFF_SDC_FILE` (mosaic step 3) | `src/bpx.sdc`: the flow's base SDC plus `set_disable_timing` on `einvp_1` TE → Z | The tri-state enable of the twin's cells is a false path (the node changes only in the pulse cycle, whose reads nothing captures) | Step 3: −2.60 ns with the arc, +3.21 ns without; the condition is a proven formal assertion (verification.md 7.4) | none needed |
+| `RSZ_DONT_TOUCH_RX` (mosaic steps 4 and 5) | `u_dly\|u_ro\.u_r[ab]\.([gnr]\|u_en\|u_dl)` | The delay cells of the pulse selector and the canaries are their delay (the resizer could swap one for a buffer); the two rings must stay cell for cell identical | Step 4: all 12 + 2 delay cells kept, logged. Protecting the ring's run net too stopped the first step-5 build (`RSZ-3006`), so the run pins are driven by an unprotected `buf_2` | – |
+| `CLOCK_PERIOD` | 33 ns (was 30, and 25 before the perceptron) | Owners' decision of 27 Nov: margin for the sum and the twin, and about 1 ns of canary lead | docs/timing.md | 30 ns |
 
 ## Trial builds (the path here)
 
 | Build | Cells | Density | Extra | Utilisation after repair | Outcome |
 | --- | --- | --- | --- | --- | --- |
 | Probe p5 (tables + placeholder logic) | default | 80 | – | 82.4 % | Clean; established the latch tables; CI and precheck green |
-| A | small | 84 | – | 83.8 % | Stopped: 12,734 routing violations, 399 mm estimated wire |
-| B | small | 80 | fan-out 16, hold margins | 78.0 % | Clean after 17 routing passes; slow-corner setup −4.7 ns at 20 ns |
+| A | small | 84 | – | 83.8 % | Stopped: 12,734 routing violations |
+| B | small | 80 | fan-out 16, hold margins | 78.0 % | Clean; slow-corner setup −4.7 ns at 20 ns |
 | C | small | 80 | B + slow delay cells excluded | 75.9 % | Clean; slow-corner setup −1.65 ns at 20 ns |
-| Repository at G2 | as C | 80 | clock 25 ns | 75.9 % | Clean; all corners met |
-| Tagged-table design (tag `g3-tage`) | as C | 80 | clock 25 ns | 75.6 % | Clean; all corners met; gate-level tests pass |
-| Perceptron, first trial (no path history) | as C | 80 | clock 25 ns | 78.0 % | Clean, but slow-corner setup −2.58 ns (14 endpoints, all through the gshare table and the sum) |
-| **Repository: perceptron, final parameters** | as C | 84 | clock 30 ns | 81.2 % | Clean; all corners met; gate-level tests pass |
-
-Not yet run: the default-cell column of the planned factorial (it would need about 7,000 µm² cut from the logic)
-and density 86.
+| Tagged-table design (tag `g3-tage`) | as C | 80 | clock 25 ns | 75.6 % | Clean; gate-level tests pass |
+| Perceptron (tag `g3-perceptron`) | as C | 84 | clock 30 ns | 81.2 % | Clean; gate-level tests pass |
+| Probe `probe-leaky` (one 16 × 8 floating-node table) | as C | – | – | – | Clean locally: 128 `einvp_1`, DRC/LVS/antenna 0; CI precheck TBD(final) |
+| Mosaic step 2 | as C | 84 | 30 ns | 74.2 % | Clean |
+| Mosaic step 3, build 1 / 2 | as C | 84 | 30 ns; build 2 with `bpx.sdc` | 82.5 % / 82.5 % | Build 1 −2.60 ns (false path); build 2 clean |
+| Mosaic step 4, builds 1 / 2 / 3 | as C | 84 | 30 ns, canary variants | 84.36 % / – / 84.34 % | Builds 1, 2 missed setup on the CONF canary; build 3 clean |
+| Mosaic step 5, ring fully protected | as C | 84 | 33 ns | – | Stopped in post-placement repair (`RSZ-3006`) |
+| Mosaic step 5, five counters | as C | 84 | 33 ns | 86 % | Routing did not converge |
+| **Mosaic final (offload)** | as C | 84 | 33 ns | TBD(final) | TBD(final) |
 
 ## Known deviations
 
-XR-03 (SHOULD): 2,259 max-slew and 5 max-capacitance warnings at the slow corner, on the wide nets of the tables
-(write data, row selects, gate terms). Their delays are included in the sign-off timing. Reducing them (repair at
-the slow corner) is an open improvement.
+XR-03 (SHOULD): maximum-slew and maximum-capacitance warnings at the slow corner on the wide nets of the tables
+(write data, row selects, gate terms): 2,259 / 5 at `g3-perceptron`, 2,787 / 14 at step 4 **(VERIFIED, progress
+log)**, final TBD(final). Their delays are included in the sign-off timing.
