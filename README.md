@@ -5,19 +5,24 @@
 BPX-1 is a stand-alone conditional-branch direction predictor. A host (a pipelined RISC-V CPU on an FPGA, a
 microcontroller, or the Tiny Tapeout demo board) sends a branch identifier and gets a taken / not-taken prediction;
 later it reports the real outcome and the chip learns from it. Four predictors run side by side on the same branch
-stream, a hashed perceptron and three classic references, so algorithms can be compared on silicon.
+stream, a hashed perceptron and three classic references, so algorithms can be compared on silicon. Around them sits
+a **mosaic of dependability experiments**: a leaky twin of one weight table with switchable codes, a write-pulse
+selector, canary flops, invariant checkers and a watchdog, demotion to the tournament, gshare randomness, two ring
+oscillators and a reset strap. All are off after reset; then every predictor is its plain, verified version.
 
-**Status: perceptron default predictor, verified to the level of gate G3.** The repository builds the real chip; the
-RTL equals the golden model on every benchmark program and on random operations; the sequencer is formally proven.
-The earlier design with tagged tables, verified to gate G3, is the tag `g3-tage` (the fallback). Start with
-`docs/HANDOVER.md`.
+**Status: the mosaic round (branch `mosaic`) is in its final verification; figures still to come are marked
+`TBD(final)` in the documents.** `main` holds the verified perceptron design (tag `g3-perceptron`); the tagged-table
+design is the tag `g3-tage` (the fallback). Start with `docs/HANDOVER.md`.
 
 | Where | What |
 | --- | --- |
 | `docs/HANDOVER.md` | State, decisions, next steps, commands. |
 | `docs/SPEC.md` | Design specification: pins, host protocol, control port, microarchitecture, the CPU contract. |
 | `docs/spec_review.md` | Review of the requirements specification and the owners' decisions on it. |
-| `docs/perceptron.md` | The perceptron default predictor: sweeps, what each part is worth, in-memory computation tried, switches and safe mode, cost. |
+| `docs/perceptron.md` | The perceptron default predictor: sweeps, what each part is worth, in-memory computation tried, switches and safe mode, cost, the trims of the mosaic round. |
+| `docs/mosaic.md` | The mosaic round: owners' brief, design, what was left out, as-built notes, progress log. |
+| `docs/experiments.md`, `docs/fault_campaign.md` | Guide to the silicon experiments for the FPGA team; the pre-silicon fault-injection campaign that is their baseline. |
+| `docs/bringup.md` | First contact with the chip, the FPGA interface, the reset strap. |
 | `docs/exploration.md` | The first exploration round: 71 programs, 16 families, held-out validation (it chose the tagged-table design). |
 | `docs/cosim.md`, `docs/cosim_dual.md`, `docs/cosim_safe.md`, `docs/verification.md`, `docs/coverage.md` | Results on the RTL: speedup and accuracy per program, golden-model equivalence, formal proofs, coverage. |
 | `docs/area.md`, `docs/timing.md` | Chip build: utilisation, timing per corner. |
@@ -45,6 +50,8 @@ cd test && make -B                          # RTL test against the golden model 
 bash cosim/run.sh && python3 cosim/report.py    # every program against the RTL -> docs/cosim.md
 bash cosim/random.sh 10 100000              # 10 x 100,000 random operations, coverage -> docs/coverage_bins.md
 CONC=1 bash cosim/random.sh 10 100000       # the same with the control port working while requests run
+RG_PLAIN=1 bash cosim/random.sh 4 50000     # the plain chip (no mosaic experiment switched on)
+
 bash formal/run.sh                          # formal proofs
 bash tools/harden.sh                        # chip flow (LibreLane) and gate-level test
 ```
