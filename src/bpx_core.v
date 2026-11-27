@@ -64,7 +64,7 @@ module bpx_core #(
     output reg  [15:0]  reg_rdata
 );
   localparam SW = CB * NT + 14;     // staging register width (the top 8 bits: the twin word, docs/mosaic.md 7.3)
-  localparam QW = W + 5;            // queue entry: {pdrv, trn, gsh, bim, def, id}
+  localparam QW = W + 1;            // queue entry: {pdrv, id} (the per-predictor statistics are the FPGA's, step 5)
   localparam [STATW-1:0] SMAX = {STATW{1'b1}};
 
   // ---------------------------------------------------------------- control registers
@@ -102,7 +102,7 @@ module bpx_core #(
   reg           rpend, rtk, rf_done, seen;
   reg  [3:0]    lp;                 // predictions of the last predict (debug)
   assign lastp = lp;
-  reg  [STATW-1:0] n_res, mis0, mis1, mis2, mis3;
+  reg  [STATW-1:0] n_res, mis_d;    // resolved branches; mispredictions of the answer given on PRED (driving predictor)
   reg  [7:0]    err_cnt;
   reg  [3:0]    eflags;             // sticky: {statistics overflow, withdrawn, predict on full, resolve on empty}
   // raw access from the control port
@@ -118,8 +118,7 @@ module bpx_core #(
   wire [QW-1:0] head    = qmem[qhead];
   wire [W-1:0]  h_id    = head[W-1:0];
   wire          pb_c    = h_id[0] ^ h_id[3];
-  wire [3:0]    h_preds = head[W+3:W];
-  wire          h_pdrv  = head[W+4];
+  wire          h_pdrv  = head[W];
 
   // ---------------------------------------------------------------- write sequencer and datapath
   wire wcap, wact, wpulse, wpulse_x, wbusy, wreq, wbad;
@@ -252,14 +251,11 @@ module bpx_core #(
   end
 
   // ---------------------------------------------------------------- statistics snapshot
-  wire [5*STATW-1:0] shadow;
-  bpx_shadow #(.N(5 * STATW)) u_shadow (.clk(clk), .gate(snap_q), .wact(wact), .wpulse(wpulse),
-      .d({mis3, mis2, mis1, mis0, n_res}), .q(shadow));
+  wire [2*STATW-1:0] shadow;
+  bpx_shadow #(.N(2 * STATW)) u_shadow (.clk(clk), .gate(snap_q), .wact(wact), .wpulse(wpulse),
+      .d({mis_d, n_res}), .q(shadow));
   wire [31:0] sn0 = shadow[0*STATW+:STATW];
   wire [31:0] sn1 = shadow[1*STATW+:STATW];
-  wire [31:0] sn2 = shadow[2*STATW+:STATW];
-  wire [31:0] sn3 = shadow[3*STATW+:STATW];
-  wire [31:0] sn4 = shadow[4*STATW+:STATW];
 
   // ---------------------------------------------------------------- control-port read
   always @* begin
@@ -272,12 +268,6 @@ module bpx_core #(
       5'h06:   reg_rdata = sn0[31:16];
       5'h07:   reg_rdata = sn1[15:0];
       5'h08:   reg_rdata = sn1[31:16];
-      5'h09:   reg_rdata = sn2[15:0];
-      5'h0a:   reg_rdata = sn2[31:16];
-      5'h0b:   reg_rdata = sn3[15:0];
-      5'h0c:   reg_rdata = sn3[31:16];
-      5'h0d:   reg_rdata = sn4[15:0];
-      5'h0e:   reg_rdata = sn4[31:16];
       5'h0f:   reg_rdata = {dinc, 1'b0, dwm, dspace, 1'b0, da};
       5'h10:   reg_rdata = {4'd0, dq};
       5'h11:   reg_rdata = fctl;
@@ -350,10 +340,7 @@ module bpx_core #(
       seen      <= 1'b0;
       lp        <= 4'd0;
       n_res     <= {STATW{1'b0}};
-      mis0      <= {STATW{1'b0}};
-      mis1      <= {STATW{1'b0}};
-      mis2      <= {STATW{1'b0}};
-      mis3      <= {STATW{1'b0}};
+      mis_d      <= {STATW{1'b0}};
       err_cnt   <= 8'd0;
       eflags    <= 4'd0;
       da        <= 7'd0;
@@ -397,7 +384,7 @@ module bpx_core #(
 
       // -------- predict (PRED and CONF: pred_n, conf_n above)
       if (p_exec) begin
-        qmem[qhead+qcnt[1:0]] <= {pdrv, preds, id_d};
+        qmem[qhead+qcnt[1:0]] <= {pdrv, id_d};
         sh   <= {sh[HL-2:0], pdrv};
         psh  <= {psh[PL-2:0], pb_p};
         lp   <= preds;
@@ -428,10 +415,7 @@ module bpx_core #(
         rpend <= 1'b0;
         if (n_res == SMAX) eflags[3] <= 1'b1;
         else n_res <= n_res + 1'b1;
-        if ((h_preds[0] != tk) && (mis0 != SMAX)) mis0 <= mis0 + 1'b1;
-        if ((h_preds[1] != tk) && (mis1 != SMAX)) mis1 <= mis1 + 1'b1;
-        if ((h_preds[2] != tk) && (mis2 != SMAX)) mis2 <= mis2 + 1'b1;
-        if ((h_preds[3] != tk) && (mis3 != SMAX)) mis3 <= mis3 + 1'b1;
+        if (r_misp && (mis_d != SMAX)) mis_d <= mis_d + 1'b1;   // the answer given was wrong (= the repair condition)
         if (r_misp) begin                           // repair: discard everything younger
           sh  <= {ch[HL-2:0], tk};
           psh <= {pch[PL-2:0], pb_c};
@@ -477,10 +461,7 @@ module bpx_core #(
       // a write-pulse cycle, so no event is lost or counted twice
       if (wact & snap_q & sclr_q) begin
         n_res <= {STATW{1'b0}};
-        mis0  <= {STATW{1'b0}};
-        mis1  <= {STATW{1'b0}};
-        mis2  <= {STATW{1'b0}};
-        mis3  <= {STATW{1'b0}};
+        mis_d  <= {STATW{1'b0}};
       end
 
       // -------- clear predictors (also the tail of reset): in-flight work and histories go
@@ -517,10 +498,7 @@ module bpx_core #(
         if (reg_wdata[1]) clrp_pend <= 1'b1;
         if (reg_wdata[2]) begin
           n_res   <= {STATW{1'b0}};
-          mis0    <= {STATW{1'b0}};
-          mis1    <= {STATW{1'b0}};
-          mis2    <= {STATW{1'b0}};
-          mis3    <= {STATW{1'b0}};
+          mis_d    <= {STATW{1'b0}};
           err_cnt <= 8'd0;
           eflags  <= 4'd0;
           fstat   <= 10'd0;
@@ -587,7 +565,7 @@ module bpx_core #(
   wire [QW-1:0] f_e1 = qmem[qhead+2'd1];
   wire [QW-1:0] f_e2 = qmem[qhead+2'd2];
   wire [QW-1:0] f_e3 = qmem[qhead+2'd3];
-  wire f_d0 = f_e0[W+4], f_d1 = f_e1[W+4], f_d2 = f_e2[W+4], f_d3 = f_e3[W+4];
+  wire f_d0 = f_e0[W], f_d1 = f_e1[W], f_d2 = f_e2[W], f_d3 = f_e3[W];
 
   always @(posedge clk) if (f_past && f_rs) begin
     // ---- structural invariants
@@ -661,7 +639,7 @@ module bpx_core #(
       if ($past(p_exec && !r_exec && !dwr_exec && !snap_exec)) assert (!$past(wcap));
       if ($past(p_exec && !r_exec && !misc_we)) assert (tc_q == $past(tc_q) && theta_q == $past(theta_q));
       if ($past(p_exec && !r_exec && !w_cmd && !(wact && snap_q && sclr_q)))
-        assert (n_res == $past(n_res) && mis0 == $past(mis0) && mis1 == $past(mis1) && mis2 == $past(mis2) && mis3 == $past(mis3));
+        assert (n_res == $past(n_res) && mis_d == $past(mis_d));
       //      trained registers change only by a resolve, a clear or a raw write
       if (ch != $past(ch)) assert ($past(r_exec) || $past(clr_exec));
       if (tc_q != $past(tc_q) || theta_q != $past(theta_q)) assert ($past(train) || $past(misc_we) || $past(clr_exec));
@@ -781,14 +759,16 @@ module bpx_canary #(
   genvar i, j;
   generate
     for (i = 0; i < N; i = i + 1) begin : g_b
-      wire [ND:0] c;
+      // the chain is fed through its own buffer u_cb and its nets are named u_dly_c, so that RSZ_DONT_TOUCH_RX
+      // (u_dly) protects the nets as well as the delay cells (as in bpx_wseq): d itself drives only unprotected cells
+      wire [ND:0] u_dly_c;
       wire        sq;
-      assign c[0] = d[i];
+      (* keep *) sky130_fd_sc_hd__buf_2 u_cb (.A(d[i]), .X(u_dly_c[0]));
       for (j = 0; j < ND; j = j + 1) begin : g_d
-        (* keep *) sky130_fd_sc_hd__dlygate4sd3_1 u_dly (.A(c[j]), .X(c[j+1]));
+        (* keep *) sky130_fd_sc_hd__dlygate4sd3_1 u_dly (.A(u_dly_c[j]), .X(u_dly_c[j+1]));
       end
       (* keep *) sky130_fd_sc_hd__dfxtp_1 u_q (.CLK(clk), .D(d[i]), .Q(q[i]));
-      (* keep *) sky130_fd_sc_hd__dfxtp_1 u_s (.CLK(clk), .D(c[ND]), .Q(sq));
+      (* keep *) sky130_fd_sc_hd__dfxtp_1 u_s (.CLK(clk), .D(u_dly_c[ND]), .Q(sq));
       (* keep *) sky130_fd_sc_hd__xor2_1 u_inv (.A(sq), .B(inv), .X(s[i]));
     end
   endgenerate

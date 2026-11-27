@@ -55,8 +55,9 @@ class Bpx1Host:
     """Protocol over four pin functions: set_ui(byte), set_uio(byte), get_uo() -> byte, idle() (lets the chip clock
     run for at least one period; with a free-running clock of 1 MHz or more it can be an empty function)."""
 
-    def __init__(self, set_ui, set_uio, get_uo, idle):
+    def __init__(self, set_ui, set_uio, get_uo, idle, get_uio=None):
         self.set_ui, self.set_uio, self.get_uo, self.idle = set_ui, set_uio, get_uo, idle
+        self.get_uio = get_uio              # optional: reads uio (PBIM, PGSH) for the per-predictor counts
         self.uio = 0x10                      # CSn high, REQ low
         self.set_ui(0)
         self.set_uio(self.uio)
@@ -168,11 +169,13 @@ class Bpx1Host:
             self.idle()
 
     def stats(self, clear=False):
-        """Snapshot the counters (optionally restarting them) and read them."""
+        """Snapshot the chip's two counters (optionally restarting them) and read them: resolved branches and the
+        mispredictions of the answers given on PRED (the driving predictor).  Per-predictor counts are the host's job
+        since mosaic step 5: replay() counts them from the prediction pins."""
         self.command(CMD_SNAPSHOT_CLEAR if clear else CMD_SNAPSHOT)
         w = self.read(REG_STATUS, 12)
-        c = [w[2 + 2 * k] | (w[3 + 2 * k] << 16) for k in range(5)]
-        return dict(resolved=c[0], mis_default=c[1], mis_bimodal=c[2], mis_gshare=c[3], mis_tournament=c[4],
+        c = [w[2 + 2 * k] | (w[3 + 2 * k] << 16) for k in range(2)]
+        return dict(resolved=c[0], mis_drive=c[1],
                     errors=w[1] & 0xFF, err_flags=(w[0] >> 8) & 0xF, in_flight=w[0] & 7)
 
     def dump(self, space, count):
@@ -230,11 +233,27 @@ class Bpx1Host:
 
     # ---------------------------------------------------------------- trace replay
     def replay(self, trace):
-        """trace: iterable of (identifier, taken).  Returns the number of mispredictions of the driving predictor."""
+        """trace: iterable of (identifier, taken).  Returns the number of mispredictions of the driving predictor and
+        counts the per-predictor mispredictions from the pins in self.counts (the chip keeps only resolved branches
+        and wrong answers since mosaic step 5): default and tournament from DBG0/DBG1, bimodal and gshare from
+        PBIM/PGSH when a get_uio function was given.  DBG0/DBG1 show the default and tournament predictions only with
+        the standard selections (CTRL events 10 and 13, as after reset) and FCTL[14] DBGF = 0: with the fault-event
+        bank selected they show fault events, and those two counts are then meaningless."""
         wrong = 0
+        self.counts = dict(mis_default=0, mis_bimodal=0, mis_gshare=0, mis_tournament=0, branches=0)
         for ident, taken in trace:
-            pred, _ = self.predict_resolve(ident, 1 if taken else 0)
-            wrong += pred != (1 if taken else 0)
+            t = 1 if taken else 0
+            pred, _ = self.predict_resolve(ident, t)
+            v = self.get_uo()
+            wrong += pred != t
+            c = self.counts
+            c["branches"] += 1
+            c["mis_default"] += ((v >> 5) & 1) != t
+            c["mis_tournament"] += ((v >> 6) & 1) != t
+            if self.get_uio:
+                u = self.get_uio()
+                c["mis_bimodal"] += (u & 1) != t
+                c["mis_gshare"] += ((u >> 1) & 1) != t
         return wrong
 
 
@@ -280,13 +299,18 @@ class TTPins:
     def get_uo(self):
         return int(self.tt.uo_out.value)
 
+    def get_uio(self):
+        """uio as the RP sees it: bits 1:0 are the chip's PBIM and PGSH outputs (for the per-predictor counts).
+        Uses the SDK's uio_out port (not yet run on hardware, like the rest of this file)."""
+        return int(self.tt.uio_out.value)
+
     def idle(self):
         self.time.sleep_us(self.wait_us)
 
 
 def demo(clock_hz=1_000_000):
     p = TTPins(clock_hz)
-    h = Bpx1Host(p.set_ui, p.set_uio, p.get_uo, p.idle)
+    h = Bpx1Host(p.set_ui, p.set_uio, p.get_uo, p.idle, p.get_uio)
     h.sync()
     print("chip id: 0x%04X (expect 0xB101)" % h.chip_id())
     h.command(CMD_CLEAR_PRED | CMD_CLEAR_STATS)
@@ -300,7 +324,9 @@ def demo(clock_hz=1_000_000):
     wrong = h.replay(trace)
     s = h.stats()
     print("branches:", len(trace), "mispredicted by the driving predictor:", wrong)
+    print("chip: resolved %d, wrong answers %d" % (s["resolved"], s["mis_drive"]))
     for k in ("mis_default", "mis_bimodal", "mis_gshare", "mis_tournament"):
-        print("  %-15s %6d  accuracy %.1f %%" % (k, s[k], 100.0 * (1 - s[k] / max(s["resolved"], 1))))
+        n = h.counts[k]
+        print("  %-15s %6d  accuracy %.1f %%  (counted from the pins)" % (k, n, 100.0 * (1 - n / max(h.counts["branches"], 1))))
     print("errors:", s["errors"])
     return h

@@ -4,7 +4,9 @@
   replay.py <oplog.bin> <drive>          (BPX_FEAT=<0..7>: the features of the default predictor, default as after reset)
 
 Every reply of the RTL (prediction and confidence) is compared with the model; prints the model's statistics in the
-same key=value form as the co-simulation, and mismatches=<n> with the first mismatching request.
+same key=value form as the co-simulation, and mismatches=<n> with the first mismatching request.  mis_drv is the chip's
+counter (wrong answers); mis_def ... mis_trn are the per-predictor counts, which the co-simulation counts from the pins
+(cosim/report.py compares both).
 """
 import os
 import sys
@@ -25,7 +27,8 @@ def main():
             if first is None:
                 first = (i // 4, op, ident, rep, r.pred | (r.conf << 1))
     s = m.stats()
-    print(f"requests={len(data) // 4} mismatches={bad} first={first} errors={s['errors']} resolved={s['resolved']} mis_def={s['mis_default']} "
+    print(f"requests={len(data) // 4} mismatches={bad} first={first} errors={s['errors']} resolved={s['resolved']} "
+          f"mis_drv={s['mis_drive']} mis_def={s['mis_default']} "
           f"mis_bim={s['mis_bimodal']} mis_gsh={s['mis_gshare']} mis_trn={s['mis_tournament']}")
 
 

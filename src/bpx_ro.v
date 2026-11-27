@@ -107,7 +107,9 @@ module bpx_ring (
     end
   endgenerate
   (* keep *) sky130_fd_sc_hd__xnor2_1 u_dl (.A(n[16]), .B(rn), .Y(n[17]));
-  assign osc = n[17];
+  // the ring's output leaves through a buffer of its own (u_ob, unprotected), so that the protected net n[17] has
+  // only ring cells and this buffer as loads and the divider's mux sits on an ordinary net
+  (* keep *) sky130_fd_sc_hd__buf_2 u_ob (.A(n[17]), .X(osc));
 endmodule
 `endif
 `endif

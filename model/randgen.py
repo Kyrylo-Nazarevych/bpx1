@@ -9,7 +9,11 @@ out.ops is played against the RTL by `cosim --rand` (cosim/cosim.cpp), one line 
                                  <<9]]; gap = idle clocks before it; setup = clocks ID/OP are placed before REQ
                                  toggles
   W addr value                   a control-port write (CTRL, CMD, FCTL, or RAW_ADDR and RAW_DATA for a raw write)
-  S / C  resolved m0 m1 m2 m3 errors flags queue     snapshot (S) or snapshot-and-clear (C), then compare
+  S / C  resolved mdrv errors flags queue d b g t ds ts
+                                 snapshot (S) or snapshot-and-clear (C), then compare; mdrv: the chip's count of wrong
+                                 answers; d b g t: per-predictor mispredictions, which the harness counts itself from
+                                 the prediction pins (as the FPGA does); ds ts: default and tournament over the branches
+                                 whose predict showed them on DBG0/DBG1 (standard events 10 and 13, FCTL[14] = 0)
   D space count w...             read `count` raw words of a state space and compare (FR-10)
   G addr value                   read one register (FCTL, FSTAT) and compare
   Z s                            a pin reset; s bit 0: OP = 3 (else OP = s >> 3), bit 1: CSn = 0, bit 2: MOSI = 1 while
@@ -191,10 +195,16 @@ def main():
 
     def stat_line(kind):
         s = m.stats()
-        ops.write(f"{kind} {s['resolved']} {s['mis_default']} {s['mis_bimodal']} {s['mis_gshare']} {s['mis_tournament']} "
-                  f"{s['errors']} {(s['err_flags'] & 3) | (8 if s['overflow'] else 0)} {len(m.queue)}\n")
+        # the chip's two counters (resolved, mispredictions of the answer given), then the four per-predictor counts
+        # that the harness counts itself from the prediction pins (as the FPGA does) and checks against the model
+        # (default and tournament twice: over all branches, checked when DBG showed them for every branch of the
+        # window, and over the branches whose predict showed them, checked always)
+        ops.write(f"{kind} {s['resolved']} {s['mis_drive']} "
+                  f"{s['errors']} {(s['err_flags'] & 3) | (8 if s['overflow'] else 0)} {len(m.queue)} "
+                  f"{s['mis_default']} {s['mis_bimodal']} {s['mis_gshare']} {s['mis_tournament']} "
+                  f"{s['mis_default_shown']} {s['mis_tournament_shown']}\n")
         if kind == "C":
-            m.n_res, m.mis = 0, [0, 0, 0, 0]
+            m.n_res, m.mis, m.mis_drv, m.mis_shown = 0, [0, 0, 0, 0], 0, [0, 0]
 
     def dump():
         for sp, n in spaces:

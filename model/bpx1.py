@@ -206,7 +206,11 @@ class Bpx1:
     def clear_counters(self):
         """The statistics and error counters only (cosim/conc_check.py accumulates totals with this)."""
         self.n_res = 0
-        self.mis = [0, 0, 0, 0]                  # default, bimodal, gshare, tournament
+        self.mis = [0, 0, 0, 0]                  # default, bimodal, gshare, tournament: counted by the FPGA from the pins
+        self.mis_drv = 0                         # the chip's counter: mispredictions of the answer given on PRED
+        # default and tournament counted only over the branches whose predict showed them on DBG0/DBG1 (standard
+        # events 10 and 13, FCTL[14] DBGF = 0): what a host can count from the pins (cosim/cosim.cpp checks it)
+        self.mis_shown = [0, 0]
         self.n_err = 0
         self.err_flags = 0
         self.stat_ovf = False
@@ -455,7 +459,8 @@ class Bpx1:
         preds = [L.p_def, L.p_bim, L.p_gsh, L.p_trn]
         drv = self.drive_eff()                     # demotion: the tournament instead of the default predictor
         pdrv = 0 if drv >= DRV_NOT_TAKEN else preds[drv]
-        self.queue.append(dict(id=ident & ((1 << self.cfg.W) - 1), preds=preds, pdrv=pdrv))
+        shown = self.dsel == [10, 13] and not self.fctl & FCTL_DBGF     # DBG0/DBG1 show the default and tournament
+        self.queue.append(dict(id=ident & ((1 << self.cfg.W) - 1), preds=preds, pdrv=pdrv, shown=shown))
         self.last_preds = preds                    # on the pins: DBG0, PBIM, PGSH, DBG1 after reset
         self.last_pdef3 = L.p_def3
         self.last_ev9 = self.last_rbit             # before the resolve of a combined request (predict first)
@@ -484,6 +489,12 @@ class Bpx1:
         for k in range(4):
             if e["preds"][k] != taken:
                 self.mis[k] = min(self.mis[k] + 1, mx)
+        if e["shown"]:
+            for j, k in enumerate((0, 3)):
+                if e["preds"][k] != taken:
+                    self.mis_shown[j] = min(self.mis_shown[j] + 1, mx)
+        if e["pdrv"] != taken:                    # the chip's counter (0x07/0x08): the answer given was wrong
+            self.mis_drv = min(self.mis_drv + 1, mx)
         if e["pdrv"] != taken:                    # the host followed a wrong prediction: repair (FR-04)
             self.queue.clear()
             self.sh = self.ch
@@ -576,8 +587,8 @@ class Bpx1:
 
     # ------------------------------------------------------------------ observation
     def stats(self):
-        return dict(resolved=self.n_res, mis_default=self.mis[0], mis_bimodal=self.mis[1], mis_gshare=self.mis[2],
-                    mis_tournament=self.mis[3], errors=self.n_err, err_flags=self.err_flags, overflow=self.stat_ovf)
+        return dict(resolved=self.n_res, mis_drive=self.mis_drv, mis_default=self.mis[0], mis_bimodal=self.mis[1], mis_gshare=self.mis[2],
+                    mis_tournament=self.mis[3], mis_default_shown=self.mis_shown[0], mis_tournament_shown=self.mis_shown[1], errors=self.n_err, err_flags=self.err_flags, overflow=self.stat_ovf)
 
     def state(self):
         """Every bit of predictor state (FR-10), in a canonical form the testbench compares with the chip."""

@@ -78,6 +78,46 @@ static void tick() {
     }
 }
 
+// ------------------------------------------------------------------ per-predictor statistics from the pins
+// Since mosaic step 5 the chip counts only resolved branches and the mispredictions of the answer it gave (PRED);
+// the per-predictor counts are the host's (the FPGA's): each accepted predict leaves its four predictions on the pins
+// (DBG0 = default, PBIM, PGSH, DBG1 = tournament while CTRL selects events 10 and 13 of the standard bank); the host
+// keeps them in its own copy of the in-flight queue and compares them with the outcome at each resolve.  pv: the DBG
+// pins showed the default and tournament predictions for this entry.
+struct HEnt { int pdrv, pd, pb, pg, pt, pv; };
+static std::deque<HEnt> hq;
+// hcnt: default, bimodal, gshare, tournament (default and tournament complete only while hinv is false);
+// hshown: default and tournament over the entries whose predict showed them on DBG (pv), always exact
+static u64 hcnt[4] = {0, 0, 0, 0}, hshown[2] = {0, 0}, hres = 0, hdrv = 0; static bool hinv = false;   // hinv: a counted entry lacked DBG
+// unsaturated totals over the whole run (never cleared but by a reset; checked by cosim/conc_check.py in CONC runs)
+static u64 tot[8] = {0, 0, 0, 0, 0, 0, 0, 0};                  // resolved, wrong answers, d, b, g, t, d shown, t shown
+static void h_clear_counts() { for (int k = 0; k < 4; k++) hcnt[k] = 0; hshown[0] = hshown[1] = 0; hres = hdrv = 0; hinv = false; }
+static void h_resolve(int taken) {
+    if (hq.empty()) return;                                    // refused (resolve on empty)
+    HEnt e = hq.front(); hq.pop_front();
+    hres++; tot[0]++;
+    if (e.pdrv != taken) { hdrv++; tot[1]++; }
+    if (e.pb != taken) { hcnt[1]++; tot[3]++; }
+    if (e.pg != taken) { hcnt[2]++; tot[4]++; }
+    if (e.pd != taken) { hcnt[0]++; tot[2]++; }                // meaningful only for pv entries
+    if (e.pt != taken) { hcnt[3]++; tot[5]++; }
+    if (e.pv) { if (e.pd != taken) { hshown[0]++; tot[6]++; } if (e.pt != taken) { hshown[1]++; tot[7]++; } } else hinv = true;
+    if (e.pdrv != taken) hq.clear();                           // repair: everything younger is discarded
+}
+// one request as the host sees it: op, id, accepted predict (pins in `pins` = DBG0 | PBIM<<1 | PGSH<<2 | DBG1<<3)
+static void h_request(int op, int id, bool acc, int pred, int pins, bool dbg_std) {
+    HEnt e{pred, pins & 1, (pins >> 1) & 1, (pins >> 2) & 1, (pins >> 3) & 1, dbg_std ? 1 : 0};
+    if (op == 0) {
+        if ((id & 3) == 1) hq.clear();
+        else if (id & 2) h_resolve(id & 1);
+        return;
+    }
+    if (op == 1) { if (acc) hq.push_back(e); return; }
+    if (hq.size() >= 4) { h_resolve(op & 1); hq.push_back(e); }   // full: resolve first (the predict is never refused)
+    else { hq.push_back(e); h_resolve(op & 1); }
+}
+static u64 sat16(u64 v) { return v > 0xffff ? 0xffff : v; }
+
 static u32 fold(u64 v, int inb, int outb) { v &= (inb >= 64 ? ~0ull : ((1ull << inb) - 1)); u32 r = 0; while (v) { r ^= (u32)(v & ((1u << outb) - 1)); v >>= outb; } return r; }
 static u32 fold_id(u32 pc) { return fold((u64)(pc >> 2), 30, 8); }
 
@@ -101,6 +141,8 @@ static int request(int op, int id, u64 t) {
     int n = 0;
     while ((top->uo_out & 1) == ack0) { tick(); if (++n > 200) { fprintf(stderr, "no acknowledge\n"); exit(3); } }
     int pred = (top->uo_out >> 1) & 1, conf = (top->uo_out >> 2) & 1;
+    // per-predictor statistics are counted here from the pins (CTRL keeps DBG0/DBG1 on events 10 and 13), as the FPGA does
+    h_request(op, id, op != 1 || hq.size() < 4, pred, ((top->uo_out >> 5) & 1) | ((top->uio_out & 3) << 1) | (((top->uo_out >> 6) & 1) << 3), true);
     n_req++; lat_sum += n; if ((u64)n > lat_max) lat_max = n; lat_hist[n < 15 ? n : 15]++;
     used += n; if (used > used_max) used_max = used;
     if (used > K) late++;
@@ -123,12 +165,13 @@ static void spi(int addr, bool wr, u32* words, int n) {
     for (int k = 0; k < 4; k++) tick();
     uio |= 0x10; drive(top->ui_in); for (int k = 0; k < 4; k++) tick();
 }
-static u64 stat[5];
+static u64 stat[5], stat_drv = 0;   // stat[0] resolved, stat_drv wrong answers (the chip); stat[1..4] the host's pin counts
 static void snapshot_clear() {            // exact totals with 16-bit counters: snapshot-and-clear, accumulate
     u32 c = 0x0010; spi(0x02, true, &c, 1);
     for (int k = 0; k < 8; k++) tick();
     u32 w[10]; spi(0x05, false, w, 10);
-    for (int k = 0; k < 5; k++) stat[k] += w[2 * k] | ((u64)w[2 * k + 1] << 16);
+    stat[0] += w[0] | ((u64)w[1] << 16);
+    stat_drv += w[2] | ((u64)w[3] << 16);
 }
 
 // ------------------------------------------------------------------ program
@@ -156,6 +199,9 @@ static void wait_ready() {
 // "G addr value" reads one register (FCTL 0x11, FSTAT 0x12) in the foreground and compares it.
 // "Z s" is a pin reset with OP, CSn and MOSI set as s says (the reset strap when all three hold; model/randgen.py).
 static char bg_kind = 0; static int bg_a = 0, bg_b = 0, bg_c = 0;
+static int h_dsel = 0xDA; static bool h_dbgf = false;           // CTRL[11:4] and FCTL[14] as the host wrote them
+static u64 h_checks = 0, h_skipped = 0, h_bad = 0;              // per-predictor count checks against the model
+static void h_reset() { hq.clear(); h_clear_counts(); h_dsel = 0xDA; h_dbgf = false; for (int k = 0; k < 8; k++) tot[k] = 0; }
 static u64 bg_jobs = 0, bg_dropped = 0;
 static void bg_idle() { int n = 0; while (bg_busy()) { tick(); if (++n > 100000) { fprintf(stderr, "control port stuck\n"); exit(3); } } }
 static u64 lo2(u64 a) { return a > 2 ? a - 2 : 0; }
@@ -216,6 +262,10 @@ static int rand_play(const char* path, const char* latpath, const char* clpath) 
             while ((top->uo_out & 1) == ack0) { tick(); if (++n > 200) { fprintf(stderr, "line %llu: no acknowledge\n", (unsigned long long)line); return 3; } }
             n_acked++;
             int got = ((top->uo_out >> 1) & 1) | (((top->uo_out >> 2) & 1) << 1);
+            {   // the host's own per-predictor counting from the pins
+                int pins = ((top->uo_out >> 5) & 1) | ((top->uio_out & 3) << 1) | (((top->uo_out >> 6) & 1) << 3);
+                h_request(op, id, op != 1 || hq.size() < 4, got & 1, pins, h_dsel == 0xDA && !h_dbgf);
+            }
             if (exp & 64)                                    // an accepted predict: the four predictions on the pins
                 got |= (((top->uo_out >> 5) & 1) | ((top->uio_out & 3) << 1) | (((top->uo_out >> 6) & 1) << 3)) << 2 | 64;
             if (op != 0 && got != (exp & 127)) { if (!bad) fprintf(stderr, "line %llu: op %d id %d reply %d, model %d\n", (unsigned long long)line, op, id, got, exp & 127); bad++; }
@@ -226,17 +276,39 @@ static int rand_play(const char* path, const char* latpath, const char* clpath) 
             int a; u32 v;
             if (fscanf(f, "%d %u", &a, &v) != 2) return 2;
             spi(a, true, &v, 1); nw++;
-            if (a == 2) wait_ready();
+            if (a == 1) h_dsel = (v >> 4) & 0xff;
+            if (a == 0x11) h_dbgf = (v >> 14) & 1;
+            if (a == 2) {
+                if (v & 1) h_reset();                               // soft reset
+                if (v & 2) hq.clear();                              // clear predictors: in-flight work goes
+                if (v & 4) h_clear_counts();                        // clear statistics
+                wait_ready();
+            }
         } else if (c == 'S' || c == 'C') {
-            u64 e[8];
-            for (int k = 0; k < 8; k++) if (fscanf(f, "%llu", (unsigned long long*)&e[k]) != 1) return 2;
+            // e: resolved, wrong answers (the chip's two counters), errors, flags, queue, then the model's per-predictor
+            // counts (default, bimodal, gshare, tournament) that the host counts itself from the pins, then default and
+            // tournament over the branches whose predict showed them on DBG0/DBG1
+            u64 e[11];
+            for (int k = 0; k < 11; k++) if (fscanf(f, "%llu", (unsigned long long*)&e[k]) != 1) return 2;
             u32 cmd = c == 'C' ? 0x0010 : 0x0008; spi(0x02, true, &cmd, 1);
             for (int k = 0; k < 8; k++) tick();
             u32 w[12]; spi(0x03, false, w, 12);
-            bool ok = (w[1] & 0xff) == e[5] && ((w[0] >> 8) & 0xb) == e[6] && (w[0] & 7) == e[7];
-            for (int k = 0; k < 5; k++) ok = ok && (w[2 + 2 * k] | ((u64)w[3 + 2 * k] << 16)) == e[k];
-            if (!ok) { if (!sbad) fprintf(stderr, "line %llu: statistics differ: status %04x errors %u resolved %u, model flags %llu errors %llu resolved %llu\n",
-                                         (unsigned long long)line, w[0], w[1], w[2], (unsigned long long)e[6], (unsigned long long)e[5], (unsigned long long)e[0]); sbad++; }
+            bool ok = (w[1] & 0xff) == e[2] && ((w[0] >> 8) & 0xb) == e[3] && (w[0] & 7) == e[4];
+            for (int k = 0; k < 2; k++) ok = ok && (w[2 + 2 * k] | ((u64)w[3 + 2 * k] << 16)) == e[k];
+            for (int k = 6; k < 12; k++) ok = ok && w[k] == 0;           // 0x09-0x0E read 0
+            if (!ok) { if (!sbad) fprintf(stderr, "line %llu: statistics differ: status %04x errors %u resolved %u wrong %u, model flags %llu errors %llu resolved %llu wrong %llu\n",
+                                         (unsigned long long)line, w[0], w[1], w[2], w[4], (unsigned long long)e[3], (unsigned long long)e[2], (unsigned long long)e[0], (unsigned long long)e[1]); sbad++; }
+            // the host's counts from the pins against the model: resolved, wrong answers, bimodal, gshare, and default and
+            // tournament over the branches whose predict showed them, always; default and tournament over all branches
+            // when DBG showed them for every branch of the window (otherwise the window is counted as skipped)
+            bool hok = sat16(hres) == e[0] && sat16(hdrv) == e[1] && sat16(hcnt[1]) == e[6] && sat16(hcnt[2]) == e[7] &&
+                       sat16(hshown[0]) == e[9] && sat16(hshown[1]) == e[10];
+            if (!hinv) hok = hok && sat16(hcnt[0]) == e[5] && sat16(hcnt[3]) == e[8] && e[5] == e[9] && e[8] == e[10]; else h_skipped++;
+            h_checks++;
+            if (!hok) { if (!h_bad) fprintf(stderr, "line %llu: host pin counts res %llu drv %llu d/b/g/t %llu %llu %llu %llu shown d/t %llu %llu (all shown %d), model %llu %llu %llu %llu %llu %llu %llu %llu\n",
+                                            (unsigned long long)line, hres, hdrv, hcnt[0], hcnt[1], hcnt[2], hcnt[3], hshown[0], hshown[1], hinv ? 0 : 1,
+                                            e[0], e[1], e[5], e[6], e[7], e[8], e[9], e[10]); h_bad++; }
+            if (c == 'C') h_clear_counts();
             nstat++;
         } else if (c == 'G') {                               // one register (FCTL, FSTAT), counted with the statistics checks
             int a; u32 e, g;
@@ -254,7 +326,7 @@ static int rand_play(const char* path, const char* latpath, const char* clpath) 
             top->rst_n = 0; for (int k = 0; k < 8; k++) tick();
             top->rst_n = 1; for (int k = 0; k < 6; k++) tick();
             uio = 0x10; drive(top->ui_in);
-            wait_ready(); nw++;
+            wait_ready(); nw++; h_reset();
         } else if (c == 'D') {
             int space, cnt;
             if (fscanf(f, "%d %d", &space, &cnt) != 2) return 2;
@@ -269,13 +341,17 @@ static int rand_play(const char* path, const char* latpath, const char* clpath) 
         } else return 2;
     }
     bg_idle(); bg_flush(cl);
+    // the host's pin counts over the whole run (CONC runs have no foreground statistics steps and no resets):
+    // cosim/conc_check.py compares them with the model's unsaturated totals
+    if (cl) { fprintf(cl, "H"); for (int k = 0; k < 8; k++) fprintf(cl, " %llu", (unsigned long long)tot[k]); fprintf(cl, " %d\n", hinv ? 1 : 0); }
     if (post_mask) tick();
     bad += post_bad;
     if (lf) fclose(lf);
     if (cl) { fclose(cl); printf("background_jobs=%llu dropped=%llu ", (unsigned long long)bg_jobs, (unsigned long long)bg_dropped); }
-    printf("requests=%llu reply_mismatches=%llu stat_checks=%llu stat_mismatches=%llu state_dumps=%llu state_word_mismatches=%llu control_writes=%llu chip_clocks=%llu\n",
+    sbad += h_bad;
+    printf("requests=%llu reply_mismatches=%llu stat_checks=%llu stat_mismatches=%llu state_dumps=%llu state_word_mismatches=%llu control_writes=%llu chip_clocks=%llu host_count_checks=%llu host_count_mismatches=%llu host_dbg_windows_skipped=%llu\n",
            (unsigned long long)nr, (unsigned long long)bad, (unsigned long long)nstat, (unsigned long long)sbad, (unsigned long long)ndump, (unsigned long long)dbad,
-           (unsigned long long)nw, (unsigned long long)chip_cycles);
+           (unsigned long long)nw, (unsigned long long)chip_cycles, (unsigned long long)h_checks, (unsigned long long)h_bad, (unsigned long long)h_skipped);
     return (bad || sbad || dbad) ? 1 : 0;
 }
 
@@ -317,6 +393,9 @@ int main(int argc, char** argv) {
         }
         snapshot_clear();
         u32 e = 0; spi(0x04, false, &e, 1);
+        for (int k = 0; k < 4; k++) stat[1 + k] = hcnt[k];
+        printf("chip_resolved=%llu host_resolved=%llu chip_wrong_answers=%llu host_wrong_answers=%llu stat_check=%s ", (unsigned long long)stat[0], (unsigned long long)hres,
+               (unsigned long long)stat_drv, (unsigned long long)hdrv, (stat[0] == hres && stat_drv == hdrv) ? "ok" : "MISMATCH");
         if (oplog) fclose(oplog);
         printf("drive=%d seq=1 branches=%llu mis_drive=%llu errors=%u resolved=%llu mis_def=%llu mis_bim=%llu mis_gsh=%llu mis_trn=%llu lat_max=%llu\n", drv, (unsigned long long)n,
                (unsigned long long)wrong, e & 0xff, (unsigned long long)stat[0], (unsigned long long)stat[1], (unsigned long long)stat[2], (unsigned long long)stat[3], (unsigned long long)stat[4], (unsigned long long)lat_max);
@@ -408,6 +487,9 @@ int main(int argc, char** argv) {
     drain(~0ull);
     snapshot_clear();
     u32 errs = 0; spi(0x04, false, &errs, 1);
+    for (int k = 0; k < 4; k++) stat[1 + k] = hcnt[k];
+    printf("chip_resolved=%llu host_resolved=%llu chip_wrong_answers=%llu host_wrong_answers=%llu stat_check=%s ", (unsigned long long)stat[0], (unsigned long long)hres,
+           (unsigned long long)stat_drv, (unsigned long long)hdrv, (stat[0] == hres && stat_drv == hdrv) ? "ok" : "MISMATCH");
     if (oplog) fclose(oplog);
     printf("errors=%u dual=%d pairs=%llu used_max=%d ", errs & 0xff, dual ? 1 : 0, (unsigned long long)pairs, used_max);
     printf("drive=%d K=%d instr=%llu branches=%llu cycles=%llu snt_cycles=%llu mis_drive=%llu wrongpath_predicts=%llu requests=%llu chip_cycles=%llu "

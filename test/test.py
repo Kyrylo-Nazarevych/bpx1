@@ -28,7 +28,39 @@ class Host:
         self.dut, self.rng = dut, rng
         self.ui, self.uio = 0, 0x10          # CSn high
         self.req = 0
+        # per-predictor mispredictions counted from the prediction pins, as the FPGA does (the chip counts only
+        # resolved branches and wrong answers since mosaic step 5): own copy of the in-flight queue, entries
+        # [answer, DBG0, PBIM, PGSH, DBG1]; meaningful while DBG has the standard selections (events 10 and 13)
+        self.hq, self.hmis, self.hres = [], [0, 0, 0, 0], 0
         self._drive()
+
+    def _h_resolve(self, taken):
+        if not self.hq:
+            return
+        e = self.hq.pop(0)
+        self.hres += 1
+        for k in range(4):
+            self.hmis[k] += e[1 + k] != taken
+        if e[0] != taken:
+            self.hq.clear()
+
+    def _h_count(self, op, ident, pred):
+        if op == bpx1.OP_SPECIAL:
+            if ident & 3 == bpx1.SUB_FLUSH:
+                self.hq.clear()
+            elif ident & 2:
+                self._h_resolve(ident & 1)
+            return
+        e = [pred] + self.pins
+        if op == bpx1.OP_PREDICT:
+            if len(self.hq) < 4:
+                self.hq.append(e)
+        elif len(self.hq) >= 4:
+            self._h_resolve(op & 1)
+            self.hq.append(e)
+        else:
+            self.hq.append(e)
+            self._h_resolve(op & 1)
 
     def _drive(self):
         self.dut.ui_in.value = self.ui
@@ -56,6 +88,7 @@ class Host:
         v = int(self.dut.uo_out.value)
         u = int(self.dut.uio_out.value)
         self.pins = [(v >> 5) & 1, u & 1, (u >> 1) & 1, (v >> 6) & 1]       # DBG0, PBIM, PGSH, DBG1
+        self._h_count(op, ident, (v >> 1) & 1)
         return (v >> 1) & 1, (v >> 2) & 1, n
 
     async def _spi_bits(self, value, nbits):
@@ -161,14 +194,23 @@ async def compare_state(h, m):
     assert f == [m.fctl, m.fstat_reg], f"FCTL, FSTAT {f} != model {[m.fctl, m.fstat_reg]}"
 
 
-async def compare_stats(h, m):
+async def compare_stats(h, m, pins=False):
+    """pins=True: also the host's per-predictor counts from the pins (only where no clear or reset happened since the
+    Host was created and DBG kept the standard selections)."""
+    if pins:
+        s = m.stats()
+        exp = [s["mis_default"], s["mis_bimodal"], s["mis_gshare"], s["mis_tournament"]]
+        assert (h.hres, h.hmis) == (s["resolved"], exp), f"pin counts {h.hres} {h.hmis} != model {s['resolved']} {exp}"
     await h.spi(0x02, [0x0008])                      # snapshot
     await ClockCycles(h.dut.clk, 8)
     w = await h.spi(0x03, n=12)
     s = m.stats()
-    got = [w[2 + 2 * k] | (w[3 + 2 * k] << 16) for k in range(5)]
-    exp = [s["resolved"], s["mis_default"], s["mis_bimodal"], s["mis_gshare"], s["mis_tournament"]]
+    # the chip counts resolved branches and the mispredictions of the answers it gave; the per-predictor counts are
+    # the host's (step 5): 0x09-0x0E read 0
+    got = [w[2 + 2 * k] | (w[3 + 2 * k] << 16) for k in range(2)]
+    exp = [s["resolved"], s["mis_drive"]]
     assert got == exp, f"statistics {got} != {exp}"
+    assert w[6:12] == [0] * 6, f"0x09-0x0E must read 0: {w[6:12]}"
     assert w[1] & 0xFF == s["errors"], f"error counter {w[1] & 0xFF} != {s['errors']}"
     assert (w[0] >> 8) & 3 == s["err_flags"] & 3, "error flags differ"
     assert w[0] & 7 == len(m.queue), "queue count differs"
@@ -217,15 +259,15 @@ async def random_ops_against_model(dut):
                 d0, d1 = m.dbg_pins()
                 assert h.pins == [d0, m.last_preds[1], m.last_preds[2], d1], f"op {n}: prediction pins {h.pins}, model {m.last_preds}"
         if n % 1000 == 999:
-            await compare_stats(h, m)
-    await compare_stats(h, m)
+            await compare_stats(h, m, pins=True)
+    await compare_stats(h, m, pins=True)
     while m.queue:                                   # resolve what is left so the tables are quiescent
         tk = outcome(m.queue[0]["id"], hist)
         m.resolve(tk)
         await h.request(bpx1.OP_SPECIAL, bpx1.SUB_RESOLVE_T if tk else bpx1.SUB_RESOLVE_NT)
     await ClockCycles(dut.clk, 8)
     await compare_state(h, m)
-    await compare_stats(h, m)
+    await compare_stats(h, m, pins=True)
     dut._log.info(f"{OPS} operations, seed {SEED}: replies, statistics and state equal the model; acknowledge latency (clocks: count) {dict(sorted(lat.items()))}; {m.stats()}")
 
 
@@ -307,7 +349,7 @@ async def trace_replay(dut):
         assert (pred, conf) == (exp.pred, exp.conf), f"record {n}: id={ident:#x} got pred={pred} conf={conf}, model pred={exp.pred} conf={exp.conf}"
         wrong += pred != taken
     await ClockCycles(dut.clk, 8)
-    await compare_stats(h, m)
+    await compare_stats(h, m, pins=True)
     await compare_state(h, m)
     dut._log.info(f"trace replay: {min(OPS, len(trace))} records, default predictor mispredicted {wrong}; statistics and state equal the model")
 

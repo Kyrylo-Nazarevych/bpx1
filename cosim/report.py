@@ -69,13 +69,24 @@ def main():
     nreq = sum(R[p]["m0"]["requests"] + R[p]["ms"]["requests"] for p in progs)
     mism = sum(R[p]["m0"]["mismatches"] + R[p]["ms"]["mismatches"] for p in progs)
     errs = sum(R[p]["d"][i]["errors"] for p in progs for i in range(5)) + sum(R[p]["seq"]["errors"] for p in progs)
+    # since mosaic step 5 the chip counts resolved branches and wrong answers; mis_def ... mis_trn are the harness's
+    # counts from the prediction pins (as the FPGA counts them).  Both are compared with the golden model's replay
+    # (runs d0 and seq); in every run the chip's counters must equal the harness's own (stat_check) and the CPU's count
+    # of mispredicted branches.
     stat_bad = [p for p in progs if any(R[p]["d"][0][k] != R[p]["m0"][k] for k in PK + ["resolved"]) or
-                any(R[p]["seq"][k] != R[p]["ms"][k] for k in PK + ["resolved"])]
+                any(R[p]["seq"][k] != R[p]["ms"][k] for k in PK + ["resolved"]) or
+                R[p]["d"][0]["chip_wrong_answers"] != R[p]["m0"]["mis_drv"] or R[p]["seq"]["chip_wrong_answers"] != R[p]["ms"]["mis_drv"] or
+                any(r.get("stat_check") != "ok" or r["chip_wrong_answers"] != r["mis_drive"] or r["chip_resolved"] != r["host_resolved"]
+                    for r in R[p]["d"] + [R[p]["seq"]])]
+    pin_checks = sum(len(PK) * 2 for p in progs)
     w("## 1. RTL against the golden model (VR-01)\n")
     w(f"- Programs: {len(progs)}; requests replayed through the golden model: {nreq:,} (U1 in-flight run with the default")
     w("  predictor driving, and the one-in-flight trace replay).")
     w(f"- Reply mismatches (prediction or confidence): **{mism}**.")
-    w(f"- Programs whose chip statistics differ from the model's: **{len(stat_bad)}** {stat_bad if stat_bad else ''}.")
+    w(f"- Programs whose statistics differ from the model's: **{len(stat_bad)}** {stat_bad if stat_bad else ''} (the chip's two")
+    w("  counters, resolved branches and wrong answers, and the per-predictor mispredictions that the harness counts from the")
+    w(f"  prediction pins as the FPGA does: {pin_checks:,} per-predictor totals compared with the model; in all {6 * len(progs)} runs the chip's")
+    w("  counters also equal the harness's count of resolved branches and of mispredicted branches).")
     w(f"- Protocol errors counted by the chip over all runs: **{errs}**.\n")
 
     # ---- aggregate
@@ -89,7 +100,8 @@ def main():
         return sp, sum(acc) / len(acc), min(acc), ""
     w("## 2. Speedup and accuracy with each predictor driving (O1, O2, PF-01, PF-02)\n")
     w(f"{len(main_set)} programs; speedup over the same CPU with static not-taken and no chip; accuracy of the driving predictor")
-    w("in its own run (U1 in-flight depth, wrong-path requests included in training as on the real CPU).\n")
+    w("in its own run (U1 in-flight depth, wrong-path requests included in training as on the real CPU). Per-predictor")
+    w("mispredictions are counted by the harness from the prediction pins (DBG0, PBIM, PGSH, DBG1), as the FPGA counts them.\n")
     w("| Driving predictor | Speedup, all | tuning | held-out | Accuracy, all | tuning | held-out | Worst program |")
     w("| --- | --- | --- | --- | --- | --- | --- | --- |")
     for i in range(5):

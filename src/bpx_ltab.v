@@ -275,19 +275,22 @@ module bpx_wseq (
 `else
   always @(negedge clk) b <= ~a;
   (* keep *) sky130_fd_sc_hd__and2_1 u_wp (.A(a), .B(b), .X(wpulse));
-  // delay line on a: tap[k] after k cells
-  wire [12:0] tap;
-  assign tap[0] = a;
+  // delay line on a: tap[k] after k cells.  The line is fed through its own buffer u_dlb, and its nets are named
+  // u_dly_tap so that RSZ_DONT_TOUCH_RX (u_dly) protects them as well as the cells: the resizer stops with RSZ-3006
+  // when it wants to repair a net with an untouchable load (seen on net `a` in a step-5 build), and a protected net
+  // is never repaired.  `a` itself then drives only unprotected cells.
+  wire [12:0] u_dly_tap;
+  (* keep *) sky130_fd_sc_hd__buf_2 u_dlb (.A(a), .X(u_dly_tap[0]));
   genvar k;
   generate
     for (k = 0; k < 12; k = k + 1) begin : g_dl
-      (* keep *) sky130_fd_sc_hd__dlygate4sd3_1 u_dly (.A(tap[k]), .X(tap[k+1]));
+      (* keep *) sky130_fd_sc_hd__dlygate4sd3_1 u_dly (.A(u_dly_tap[k]), .X(u_dly_tap[k+1]));
     end
   endgenerate
   // static one-hot select of the tap (setting 0: no tap, d = 0), hand-mapped AND-OR: one path per tap
   wire [7:0] tsel = 8'd1 << psel;
   wire       d;
-  bpx_aor #(.N(8)) u_tmux (.a({tap[12], tap[8], tap[6], tap[4], tap[3], tap[2], tap[1], 1'b0}), .b({tsel[7:1], 1'b0}), .y(d));
+  bpx_aor #(.N(8)) u_tmux (.a({u_dly_tap[12], u_dly_tap[8], u_dly_tap[6], u_dly_tap[4], u_dly_tap[3], u_dly_tap[2], u_dly_tap[1], 1'b0}), .b({tsel[7:1], 1'b0}), .y(d));
   (* keep *) sky130_fd_sc_hd__and3b_1 u_wpx (.A_N(d), .B(a), .C(b), .X(wpulse_x));
 `endif
 endmodule

@@ -1,7 +1,7 @@
 {
   "//": "BPX-1 flow configuration. Every difference from the Tiny Tapeout template default is listed, with its reason and evidence, in docs/area.md (spec AL-02).",
 
-  "PL_TARGET_DENSITY_PCT": 84,
+  "PL_TARGET_DENSITY_PCT": 80,
 
   "//": "33 ns = 30.3 MHz (owners, 27 Nov 2026; was 30 ns): the slow corner (ss, 100 C, 1.60 V) closes with margin with the perceptron sum and the leaky twin in the predict cycle, and the canaries get a lead of about 1 ns typical (docs/mosaic.md 7.5, step 5).",
   "CLOCK_PERIOD": 33,

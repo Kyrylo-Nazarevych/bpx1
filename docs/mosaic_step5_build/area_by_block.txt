@@ -1,0 +1,25 @@
+yosys rc=0
+bpx_ltab     own     2706  total     3747  children: 32x$paramod\bpx_aor\N=s32'00000000000000000000000000001000(33)
+bpx_psum     own     1358  total     1358  children: 
+bpx_fold     own       35  total       35  children: 
+bpx_fold     own       35  total       35  children: 
+bpx_fold     own       44  total       44  children: 
+bpx_ltab     own     2721  total     3241  children: 16x$paramod\bpx_aor\N=s32'00000000000000000000000000001000(33)
+bpx_fold     own      131  total      131  children: 
+bpx_fold     own      140  total      140  children: 
+bpx_fold     own       26  total       26  children: 
+bpx_ltab     own     2720  total     3240  children: 16x$paramod\bpx_aor\N=s32'00000000000000000000000000001000(33)
+$paramod\bpx_aor\N=s32'00000000000000000000000000001000 own       33  total       33  children: 
+bpx_chip     own      414  total    54915  children: 1xbpx_core(51997), 1xbpx_ro(618), 1xbpx_spi(1886)
+bpx_ring     own      148  total      148  children: 
+bpx_ro       own      323  total      618  children: 2xbpx_ring(148)
+bpx_spi      own     1886  total     1886  children: 
+bpx_canary   own      148  total      148  children: 
+bpx_core     own    12890  total    51997  children: 1xbpx_pred(38059), 1x$paramod\bpx_shadow\N=s32'00000000000000000000000000100000(484), 1xbpx_canary(148), 1xbpx_wseq(415)
+bpx_pred     own     4951  total    38059  children: 1xbpx_ltab(3747), 1xbpx_ltab(6300), 2xbpx_fold(44), 2xbpx_fold(35), 2xbpx_ltab(3241), 1xbpx_ltab(6350), 8xbpx_fold(26), 8xbpx_fold(0), 2xbpx_fold(35), 2xbpx_fold(18), 2xbpx_psum(1358), 2xbpx_fold(131)
+$paramod\bpx_shadow\N=s32'00000000000000000000000000100000 own      484  total      484  children: 
+bpx_fold     own       18  total       18  children: 
+bpx_fold     own        9  total        9  children: 
+bpx_wseq     own      383  total      415  children: 1x$paramod\bpx_aor\N=s32'00000000000000000000000000001000(33)
+bpx_ltab     own     5309  total     6350  children: 32x$paramod\bpx_aor\N=s32'00000000000000000000000000001000(33)
+bpx_ltab     own     5259  total     6300  children: 32x$paramod\bpx_aor\N=s32'00000000000000000000000000001000(33)

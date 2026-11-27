@@ -368,8 +368,9 @@ and reset.
 2. [done] Trims (7.1), re-verify, local build for the new area baseline.
 3. [done] Registers (7.2), leaky twin (7.3): RTL, model, random generator, tests; local build.
 4. [done] Pulse selector (7.4); canary, checkers, watchdog (7.5); demotion (7.6); formal.
-5. gshare randomness, oscillators, strap (7.7); local build.
-6. Full regression (co-simulation of the 71 programs, random plain and concurrent, formal, cocotb, local build),
+5. [done, 27 Nov] gshare randomness, oscillators, strap (7.7), code mask, statistics offload; build (section 9).
+6. [regression done, 27 Nov (section 9); documents other than SPEC and this file, CI, merge and tag still open]
+   Full regression (co-simulation of the 71 programs, random plain and concurrent, formal, cocotb, local build),
    documents (SPEC, verification, area, timing, bring-up experiments), CI, merge to `main`, tag.
 
 7. Pre-silicon fault-injection campaign (owners' request of 26 Nov, once the design is stable; on Vast, economical):
@@ -526,3 +527,96 @@ campaign): labels `bpx1-*`, destroy when idle, $12 total cap.
     At the slow corner setting 7 is nearly the standard pulse. The row and gate cells after `u_wpx` reshape these
     further (not timed: latch gates are not endpoints). No constrained path runs through the delay line or
     `u_wpx` (OpenSTA: no paths), so `src/bpx.sdc` needed no new exception.
+- 27 Nov, step 5 completed (gshare randomness, rings, strap, code mask as in 7.7; statistics offload; two flow
+  fixes; build) **(VERIFIED, this session, unless marked)**. Commit `f78ae8f` held the step-5 RTL and its
+  verification (build pending); the build of that source (five statistics counters) placed at 86 % and did not
+  converge in detailed routing, so the owners' pre-authorised fallback, the statistics offload, was taken.
+
+  As built (differences from 7.7 and from SPEC before this step):
+  - **Statistics offload.** The chip keeps two counters: `n_res` (resolved branches) and `mis_d` (mispredictions of
+    the answer given on PRED, the repair condition `r_misp`; 16 bits, saturating). The queue entry is
+    `{pdrv, id}` (was `{pdrv, trn, gsh, bim, def, id}`); the snapshot shadow is 32 bits; STATS 0x05/0x06 resolved,
+    0x07/0x08 wrong answers, 0x09–0x0E read 0. The per-predictor counts are the FPGA's: it sees the four
+    predictions of every executed predict on DBG0, PBIM, PGSH, DBG1, keeps a copy of the in-flight queue by the
+    rules of SPEC 3.2 and compares them with the outcomes it reports. DBG0/DBG1 show the default and tournament
+    predictions only with the standard selections (events 10 and 13) and FCTL[14] = 0; under DBGF they show fault
+    events, so those two counts are taken only over the predicts made under the standard selection (SPEC 4).
+    Synthesised (Yosys, hierarchy kept): chip 54,915 µm² against 58,302 for the five-counter source `f78ae8f`
+    (−3,387 µm²); `bpx_core` own logic 12,890, snapshot shadow 484.
+  - **Verification of the offload, no weaker than before.** The golden model keeps all four per-predictor counts
+    (and, for the harness, default and tournament over the branches whose predict showed them on DBG,
+    `mis_shown`). `cosim/cosim.cpp` counts the four per-predictor mispredictions itself from the pins, with its own
+    copy of the queue, exactly as the FPGA would; in the random runs every statistics step compares the chip's two
+    counters and 0x09–0x0E = 0, and the harness's resolved, wrong-answer, bimodal, gshare and shown default and
+    tournament counts with the model (the complete default and tournament counts too, in windows where DBG showed
+    every branch); in concurrent runs the harness's totals over the whole run are compared with the model's by
+    `cosim/conc_check.py` (line H of the log). In the program co-simulation the per-predictor numbers of the reports
+    are the harness's pin counts, compared with the model's replay (runs d0 and seq), and in every run the chip's
+    counters equal the harness's resolved and mispredicted counts. `test/test.py` counts from the pins too
+    (random and trace tests). `host/bpx1.py` `replay()` counts from the pins (`TTPins.get_uio` added; not run on
+    hardware).
+  - **Flow fix 1 (RSZ-3006).** The write-pulse delay line (`bpx_wseq`) and the canary chains are fed through their
+    own named `buf_2` (`u_dlb`, `u_cb`) and their nets are named `u_dly_tap`, `u_dly_c`, so that
+    `RSZ_DONT_TOUCH_RX` (`u_dly`) protects nets and cells and the net driving them has only unprotected loads: an
+    earlier step-5 build stopped in repair with RSZ-3006 on net `a`. No RSZ-3006 or ODB-1211 in the final build.
+  - **Flow fix 2.** Each ring's output leaves through its own `buf_2` (`u_ob`), so the protected ring net `n[17]`
+    has only ring cells and that buffer as loads.
+  - **Placement density 80** (`PL_TARGET_DENSITY_PCT`, was 84): builds of the offload source at density 84 and 82
+    were still at 57 and 183 detailed-routing violations after 31 and 18 iterations when the density-80 build had
+    finished clean; they were stopped. docs/area.md (flow settings) is to be updated with this.
+
+  Verification of the final source (the committed one):
+  - cocotb latch cells / flip-flop model / repository top: 11/11 each (`tb3.sh`).
+  - Random 92 × 100,000 (`v_random.sh`): plain 9,200,750 requests, 0 reply, statistics, state mismatches; 9,631
+    statistics windows with the harness's pin counts checked, 0 mismatches (6,457 of them without the complete
+    default/tournament check because DBG showed fault events for part of the window; their shown counts were
+    checked); concurrent 9,200,759 requests, 0 mismatches, pin totals equal to the model in 92 of 92 runs. Coverage
+    295 of 295 reachable bins = 100 % (cross 52/52, other 243/243; 16 cross and 14 other bins cannot occur,
+    docs/coverage_bins.md).
+  - Plain mode `RG_PLAIN=1` (FCTL never written: 0 FCTL writes, 0 CTRL writes with bit 15, 0 pin resets in the
+    stream of seed 1), 92 × 100,000: plain 9,200,796 requests, concurrent 9,200,776 requests, 0 mismatches, pin
+    totals equal in 92 of 92 (the first concurrent attempt lost 28 runs to "Resource temporarily unavailable"
+    while other jobs ran on the machine; rerun alone).
+  - Counter saturation (new: no earlier run reached it): 8 × 1,000,000 operations, 8,000,637 requests, 0
+    mismatches; in seed 101, 455 of 1,031 statistics steps had the resolved count saturated and 236 the
+    wrong-answer count, with the overflow flag checked.
+  - Mutation (4 × 20,000 plain + 4 × 20,000 concurrent each, unless stated; all caught, an unmutated control
+    copy clean): GRAND hold bit inverted, GRAND hold ignoring the bit, LFSR wrong tap, LFSR stepping on every
+    write capture, strap without OP, without CSn, without MOSI, mask missing on the training write, on the clear
+    value, on the restore value, on the read, `mis_d` counting every resolve, `mis_d` counting another prediction,
+    `mis_d` without saturation (caught only by the 8 × 1,000,000 runs: 198–239 statistics mismatches per run),
+    harness: bimodal counted from the gshare pin, no repair in its queue copy, DBG taken as always standard,
+    a full-queue predict accepted, tournament counted from DBG0 (shown and complete counts).
+  - Formal (`v_fv.sh`): prove, nowait, cover, bmc, bmcfull: all pass.
+  - Co-simulation of the 71 programs (`v_cosim.sh`): 140,267,792 / 140,281,743 / 140,694,144 requests replayed
+    through the model (one request per cycle / two per cycle / safe mode), 0 reply mismatches, 0 programs with
+    statistics differing from the model, 0 protocol errors, 0 late answers. Default driving: speedup over static
+    not-taken 1.1307 (tuning 1.1280, held-out 1.1384) / 1.1345 / 1.1249 (safe); accuracy of each predictor
+    driving: default 90.93 %, bimodal 86.47 %, gshare 87.29 %, tournament 88.92 % (safe default 89.06 %). Default
+    below the best reference on 2 programs (sys.json −0.78, interp.expr −0.09 points; 31 in safe mode). Against
+    `explore/bpsim` (W = 8, `cosim/bpsim.cfg`): default one-in-flight mispredictions equal on 69 of 69 programs,
+    in-flight equal on 45 of 69 (the misprediction-alone rule), bimodal 69, gshare 63, tournament 68 of 69.
+    Reports regenerated: docs/cosim.md, cosim_dual.md, cosim_safe.md (the first generated since the perceptron
+    round).
+  - **Build (density 80, 33 ns, LibreLane 3.0.14 on the rented machine, tag `s5p80`)**: 80.92 % instance
+    utilisation, 58,720 µm² standard cells (sequential 25,236; timing-repair buffers 4,404 in 763 cells; clock
+    buffers 908), wire length 195,623 µm; routing DRC 0 (detailed routing: 0 after 14 iterations, then 0 after 7
+    in the second routing round), Magic DRC 0, LVS 0, antenna 0; **setup +3.53 ns at the slow corner, 0
+    violations**, nominal +14.89 ns, hold +0.058 ns (ff), 0 hold violations; 2,682 max-slew and 9 max-cap
+    warnings (slow corner), 0 max-fanout. Gate-level test 6 passed + 5 skipped (RTL-only tests). Final netlist:
+    256 `einvp_1`; rings A and B 20 cells each, cell for cell identical (18 ring cells + `u_bf` + `u_ob`); 16
+    named delay cells `u_dly` (12 in the pulse line, 2 × 2 in the canaries; 114 further `dlygate4sd3_1` are
+    hold-repair buffers `hold*`).
+  - Static timing (OpenSTA in the LibreLane container, final netlist and SPEF, flow SDC plus the `einvp_1`
+    exception; docs/mosaic_step5_build/): worst path at the slow corner is the CONF canary, +3.53 ns
+    (flop `_5994_` → twin read-address fan-out → twin read tree → mask `g_twm` → decoder → sum → CONF D → `u_cb`
+    → 2 × `dlygate4sd3_1`); real CONF
+    flop +6.14, real PRED flop +7.40, PRED canary +5.00; next real endpoints +6.90. Canary lead (slack of the flop
+    minus slack of its canary), CONF / PRED: tt 1.26 / 1.23 ns, ss 2.61 / 2.41 ns, ff 0.83 / 0.85 ns.
+  - Ring loops in static timing: "Warning: There are 4 combinational loops in the design." (two per ring), each
+    cut at `u_ro.u_r[ab].g_st[0].u1` A → X ("| loop cut point"); no constrained path runs through a ring (the
+    divider and random bit are taken through synchroniser flops). Reported in the mid-flow STA steps; the
+    post-route per-corner logs were not fetched before the remote copy was deleted.
+  - Where things are: build `vast/results/s5p80/` (metrics, reports, netlist) and the full fetched run
+    `~/work/bpx1_vast/h_s5p80/runs/wokwi` (WSL); copied into the repository: docs/mosaic_step5_build/ (metrics,
+    area by block, STA per corner, loop warning).
