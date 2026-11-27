@@ -15,26 +15,30 @@ Each step isolates one thing, so the first failing step says where the problem i
 
 | Step | Do | Expect | If not |
 | --- | --- | --- | --- |
-| 1 | Select the project, clock 1 MHz, pulse reset (at least 4 clocks low) | `uo_out[4]` (`READY`) high within 10 clocks; `ACK` equals the `REQ` level | Clock or reset not reaching the chip; project not selected |
+| 1 | Select the project, clock 1 MHz, pulse reset (at least 4 clocks low) with `CSn` high (section 5: the reset strap) | `uo_out[4]` (`READY`) high within 10 clocks; `ACK` equals the `REQ` level; FSTAT = 0 | Clock or reset not reaching the chip; project not selected |
 | 2 | `h.chip_id()` | `0xB101` | SPI wiring or speed: `SCK` must stay below one eighth of the chip clock; the bit-banged host is far below that |
 | 3 | `h.request(OP_SPECIAL, 0)` (NOP) | `ACK` toggles | Handshake: check `REQ` on `uio[7]` |
 | 4 | `h.predict_resolve(5, 1)` 20 times | The first answers are 0, then 1; `h.stats()` shows `resolved` = 20 | Tables not learning: go to step 6 |
-| 5 | `demo()` | Mispredictions per predictor printed; `errors` = 0 | Compare with the golden model: `model/bpx1.py` replays the same trace |
-| 6 | `h.dump(0, 64)`, `h.dump(1, 128)`, `h.dump(8, 32)` … `h.dump(11, 32)` after `CMD_CLEAR_PRED` | 64 × `5`, 128 × `1`, then 32 × `0`, `31`, `0`, `31` for the four weight tables (the initial values; 31 is −1 in five bits) | A table that does not hold or clear its value: note which entries, see section 4 |
+| 5 | `demo()` | Branches and mispredictions of the driving predictor (chip counters); `errors` = 0 | Compare with the golden model: `model/bpx1.py` replays the same trace |
+| 6 | `h.dump(0, 64)`, `h.dump(1, 128)`, `h.dump(8, 32)` … `h.dump(11, 32)` after `CMD_CLEAR_PRED` | 64 × `5`, 128 × `1`, then 32 × `0`, `15`, `0`, `15` for the four weight tables (the initial values; 15 is −1 in four bits) | A table that does not hold or clear its value: note which entries, see section 4 |
 
 The golden model predicts every pin-level answer: for any sequence of requests, `model/bpx1.py` gives the same
 `PRED`, `CONF`, prediction pins, statistics and table contents as the RTL (420 million requests in simulation
-without a difference). A difference on silicon is therefore a hardware fault, and the raw dump shows where.
+without a difference for the perceptron design; for the mosaic: docs/verification.md). A difference on silicon with
+FCTL = 0 is therefore a hardware fault, and the raw dump shows where.
 
 ## 3. Things worth measuring
 
-- **Maximum clock.** Raise the clock until `demo()` differs from the model. Signed off at 33 MHz for the slow
-  corner; typical silicon should reach about 60 MHz (docs/timing.md). The handshake does not care about the ratio
-  between host speed and chip clock.
+- **Maximum clock.** Raise the clock until `demo()` differs from the model. Signed off at 30.3 MHz (33 ns) for the
+  slow corner; typical-corner figure TBD(final) (docs/timing.md). The canaries (FSTAT[4]) should warn first:
+  docs/experiments.md, experiment 6. The handshake does not care about the ratio between host speed and chip clock.
 - **Single-stepping.** Stop the clock anywhere and step it by hand: the design is fully static, and the tables
   (latches) hold without a clock.
 - **Statistics while running.** `h.stats()` can be called between any two requests; `stats(clear=True)` restarts
-  the counters without losing an event (16-bit counters: read them at least every 65,535 branches).
+  the counters without losing an event (16-bit counters: read them at least every 65,535 branches). The chip counts
+  resolved branches and the mispredictions of the answers it gave on `PRED`; registers 0x09–0x0E read 0 (statistics
+  offload). Each predictor's mispredictions are counted by the host from the four prediction pins (section 5).
+  `host/bpx1.py` `stats()` still reads five counters and changes with the offload: TBD(final).
 - **Debug pins.** `CTRL[7:4]` and `CTRL[11:8]` select which internal event appears on `uo_out[5]` and `[6]`
   (docs/SPEC.md 6.4): for a logic analyser when a step above fails.
 
@@ -45,7 +49,8 @@ The tables are latches written by a pulse that is half a clock period wide, buil
 (docs/timing.md). If entries fail to write at a high clock but work at a low one, the pulse is too short for that
 clock: lower the clock; that is the fix, there is no setting to change. If entries fail at every clock, read them
 with `dump`, write them with the raw-access registers (`RAW_ADDR` with the write-mask bits, then `RAW_DATA`), and
-read back, to separate a cell that cannot hold from a path that cannot write.
+read back, to separate a cell that cannot hold from a path that cannot write. FCTL[7:5] (PULSE) shortens the pulse
+of W0–W2 only, as an experiment; it is 0 after reset, and must be 0 for this test.
 
 `CTRL` bit 3 (freeze) stops all learning: predictions then depend only on the table contents, which makes a
 suspect entry reproducible.
@@ -65,11 +70,27 @@ The complete contract is docs/SPEC.md section 9; the pin-level protocol is secti
   analysis the four predictions `DBG0` (default), `PBIM`, `PGSH`, `DBG1` (tournament), valid with `ACK`. 3.3 V.
   `uio[0]` and `uio[1]` are **outputs of the chip**: the FPGA and the demo board must leave them undriven.
 - Launch `ID`/`OP` and the `REQ` toggle from registers of the FPGA; synchronise `ACK` with two flip-flops, then
-  take `PRED`. With the chip at 33 MHz the answer is on the pins 3 chip clocks (90 ns) after `REQ` is seen, 4 to 6
-  clocks when the request follows a resolve directly.
+  take `PRED`. With the chip at 30.3 MHz (33 ns) the answer is on the pins 3 chip clocks (99 ns) after `REQ` is
+  seen, 4 to 6 clocks when the request follows a resolve directly.
 - The SPI control port can be driven by the FPGA or left to the demo board's microcontroller; the two ports are
   independent.
 - Identifier: `fold_id(pc)` in `host/bpx1.py` (XOR of the 8-bit slices of `pc[31:2]`).
+- **Misprediction counts per predictor are the FPGA's job** (statistics offload). With every `ACK` of a predict the
+  four predictions are on pins: `PRED` (the driving predictor), `DBG0` (default) and `DBG1` (tournament) with the
+  reset selections of CTRL, `PBIM`, `PGSH`. The FPGA keeps each predictor's prediction per in-flight branch and
+  compares it with the outcome it sends in the resolve. The chip keeps only the branch count and the driving
+  predictor's mispredictions, which a slow SPI-only host can read. When an experiment puts fault events on the DBG
+  pins, the default's and the tournament's predictions are not on pins for that run (docs/experiments.md 1).
+- **During reset** the FPGA drives `CSn` high (or `OP` ≠ 3, or `MOSI` = 0) and `SCK` low. The **reset strap** is
+  `OP = 3`, `CSn = 0` and `MOSI = 1` at the last clock edge of reset: the chip then keeps its tables (warm reset,
+  FSTAT[11] KEPT). `OP = 3` alone is harmless, but an FPGA that resets the chip in the middle of an SPI word with
+  `MOSI` high could hit the strap. For a deliberate strap, hold the three pins from 4 clocks before `rst_n` rises to
+  4 clocks after, keep `SCK` low, then take `CSn` high for at least 4 clocks before the first SPI word
+  (`h.reset(strap=True)`; docs/SPEC.md 5).
+- **Experiments** (docs/experiments.md): the FPGA provides the clock control (period steps, single short cycles), a
+  lock-step twin of the RTL, event counters with time stamps on the DBG pins, a raw-access injector over SPI and a
+  frequency counter for the ring oscillators; the table in its section 14 lists what each experiment needs. Every
+  experiment returns to the safe state: FCTL = 0, CTRL[15] = 0, CMD bits 2 and 1.
 
 ## 6. Who drives clock, reset and project selection
 
@@ -87,7 +108,8 @@ specs/gpio), the firmware source `tt-micropython-firmware` and the multiplexer d
 
 Limits that matter for the FPGA link **(VERIFIED by the same agent, specs/gpio and specs/clock)**: 3.3 V I/O, not
 5 V tolerant; input pads to 66 MHz, **output pads to 33 MHz** (BPX-1's outputs change at most once per request, so
-the 33 MHz chip clock is at this limit only for a signal that toggles every clock, which none does); up to 10 ns from the clock pad to the project's clock.
+the 30.3 MHz chip clock is below this limit even for a signal that toggled every clock); up to 10 ns from the clock pad to the project's clock.
+
 
 **(DON'T KNOW)**: which header pins of the demo board carry `clk` and `rst_n`, and whether series resistors sit
 between the RP2 and those nets. The schematic PDF of the board (`tt-demo-pcb`, file `tt-etr-dbv3.pdf`) settles it;

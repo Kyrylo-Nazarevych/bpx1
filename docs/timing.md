@@ -1,44 +1,93 @@
 # BPX-1 timing (DR-03, PF-04, XR-04, XR-05)
 
-All numbers **(VERIFIED)** from the local LibreLane sign-off STA of the build of the perceptron design with its
-final parameters, 26 Nov 2026.
+Sign-off STA of local LibreLane builds (since the end of the mosaic round also of the rented machine with the same
+image). Mosaic steps are **(VERIFIED, progress log)** = recorded in docs/mosaic.md section 9; figures of the final
+build are `TBD(final)`.
 
-| Corner | Setup worst slack at 30 ns (33.3 MHz) | Hold |
+## Result (final mosaic build)
+
+| Corner | Setup worst slack at 33 ns (30.3 MHz) | Hold |
 | --- | --- | --- |
-| Slow: ss, 100 °C, 1.60 V | +3.87 ns | |
-| Typical: tt, 25 °C, 1.80 V | +14.00 ns | |
-| All corners | 0 violations | worst slack +0.06 ns, 0 violations |
+| Slow: ss, 100 °C, 1.60 V | TBD(final) | |
+| Typical: tt, 25 °C, 1.80 V | TBD(final) | |
+| All corners | TBD(final) | TBD(final) |
 
-**Signed-off clock: 33.3 MHz (30 ns)**, with 3.9 ns (13 %) of margin at the slow corner: the slowest path is
-26.1 ns there (38 MHz), 16.0 ns at the typical corner (62 MHz). PF-04 asks for a clock fast enough for IR-07 (a
-1 MHz CPU): met about eight times over (below).
+**Clock: 33 ns (30.3 MHz)**, owners' decision of 27 Nov 2026 (was 30 ns): margin for the perceptron sum and the
+leaky twin's decoder in the predict cycle, and about 1 ns of lead for the canaries (below). Worst path and its
+length: TBD(final).
 
-**Why 30 ns and not the 25 ns of the tagged-table design.** The perceptron's sum is in the predict cycle. A trial
-build at 25 ns closed everywhere except on that sum: −2.58 ns on `CONF`, −1.92 ns on `PRED`, 14 failing endpoints at the slow corner, every
-one of them request-pending decode → read-port select → gshare table (128 entries, the slowest read) → adder of the
-four weights and three reference inputs → sign or threshold compare → driving-predictor select → output flop
-**(VERIFIED: path report of that build)**. The next non-sum path had +6.98 ns. The alternatives are in
-docs/perceptron.md 6: the chosen one keeps the acknowledge at the third clock (3 × 30 = 90 ns), the other adds a
-clock (4 × 25 = 100 ns) and changes the sequencer. Reserve for a later revision: a late-select sum (the gshare
-counter only selects among four precomputed comparisons), estimated at 2 ns **(ESTIMATED, not built)**.
+## Timing history of the mosaic round
 
-**Latency and the CPU clock it serves (O3, IR-07).** The acknowledge and the prediction leave the chip at the third
-clock edge after `REQ` arrives: at most 3 × 30 ns plus output delay. With the 20 ns round trip of the pads and about
-10 ns in the FPGA to synchronise `ACK`, a prediction is back within about 120 ns **(ESTIMATED: clock periods plus
-the platform figures of C-03)**, so a CPU of up to about 8 MHz gets its answer in the cycle it asks (9 MHz with the
-tagged-table design at 25 ns). Measured in the co-simulation at the pins, in chip clocks **(VERIFIED)**: with one
-request per CPU cycle every acknowledge of the CPU runs comes exactly 3 clocks after the request (475 million
-requests), so 4 chip clocks per CPU cycle suffice (8.3 MHz at this clock); two requests in one CPU cycle need 7 chip
-clocks (SPEC 9, rule 7; 4.1 MHz with the 8 clocks the adapter needs). Back-to-back requests in the random tests are
-acknowledged after 3 clocks in 92 % of cases and after 4 to 6 clocks when the training of the previous resolve is
-still being written **(VERIFIED)**.
+| Build | Clock | Slow-corner setup | Worst path |
+| --- | --- | --- | --- |
+| `g3-perceptron` | 30 ns | +3.87 ns | the perceptron sum in the predict cycle |
+| Step 2 (trims) | 30 ns | +1.87 ns | BC table → reference terms → CONF; probably the ×3 weights, which need an adder where ×4 was a shift **(ESTIMATED in the log)** |
+| Step 3, build 1 | 30 ns | −2.60 ns, 27 endpoints | false path: pulse flop `b` → twin write gate → `einvp_1` TE → Z → read tree → decoder → sum → CONF |
+| Step 3, build 2 (`src/bpx.sdc`) | 30 ns | +3.21 ns | address flop → twin read → mask → decoder → sum → CONF (reference weights back to ×4) |
+| Step 4, build 1 (canary 2 × `dlygate4sd3_1`, XOR before the shadow flop) | 30 ns | −0.39 ns | CONF canary (CONF itself +2.18) |
+| Step 4, build 2 (one `dlygate4sd3_1`) | 30 ns | −0.34 ns | CONF canary (CONF itself +1.16) |
+| Step 4, build 3 (one `dlygate4sd1_1`, XOR after the shadow flop) | 30 ns | +2.06 ns | CONF canary; real CONF +2.46, PRED +3.54, its canary +3.06; typical corner +13.87, hold +0.066 |
+| Final (two `dlygate4sd3_1` per canary, offload) | 33 ns | TBD(final) | TBD(final) |
 
-**What static timing does not cover.** The data and gate pins of the 1,329 latches are reported as unconstrained:
-no clock reaches a latch, by design (docs/SPEC.md 6.2). Their timing holds by construction: data and select terms
-change a full clock before the write pulse and not until half a clock after it; the pulse is half a clock wide
-(15 ns at 33 MHz, against gate delays of 1 to 3 ns). The complete read path is covered by static timing. The
-gate-level test exercises every table through these paths (unit delays).
+All rows **(VERIFIED, progress log)** except the last. The rented machine reproduced step-4 build 3 exactly
+(+2.057 ns) **(VERIFIED by the owners' report)**.
 
-**XR-04, XR-05.** The design is fully static: one clock, no minimum frequency; the latches hold without a clock.
-Every output pin is driven by a flop, so there is no combinational path from an input pin to an output pin
-**(VERIFIED by inspection of `src/bpx_chip.v`: `uo_out` is a concatenation of flop outputs)**.
+**Placement sensitivity (step 4).** The real CONF flop's slow-corner slack was +2.18, +1.16 and +2.46 ns in three
+builds that differed only in the canary cells: placement moves the critical path by more than a nanosecond. A
+canary with a fixed lead can therefore be ahead in one build and fail setup in the next; this is why step 4 shortened
+the chain and why the owners chose 33 ns, which gives room for a longer one. Read the slack of the real flops and of
+the canaries after every build.
+
+## The canaries
+
+A shadow flop on PRED and on CONF samples the same D through a delay chain; it disagrees when the margin is used
+up. The lead is the chain's delay.
+
+| Build | Chain | Lead, typical | Lead, slow corner |
+| --- | --- | --- | --- |
+| Step 4, build 3 (30 ns) | one `dlygate4sd1_1` | 0.20 ns (CONF), 0.22 ns (PRED) | 0.40 ns, 0.48 ns **(VERIFIED, progress log)** |
+| Final (33 ns) | two `dlygate4sd3_1` | about 1.1 ns **(ESTIMATED: 2 × 0.56–0.58 ns, liberty)**; measured TBD(final) | about 2.2 ns **(ESTIMATED: 2 × 1.07–1.16 ns)**; measured TBD(final) |
+
+The canary must keep at least 0.3 ns of slack itself. The comparison is made in the clock after PRED and CONF were
+loaded, so fault event 4 comes one clock after the ACK.
+
+## Write-pulse widths (W0–W2, FCTL[7:5])
+
+At `u_wpx/X`, from the step-4 final netlist and parasitics (OpenSTA, latest edges; ns) **(VERIFIED, progress log)**:
+
+| Setting (delay cells) | 1 (1) | 2 (2) | 3 (3) | 4 (4) | 5 (6) | 6 (8) | 7 (12) | 0 (standard) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| tt | 0.73 | 1.33 | 1.98 | 2.59 | 3.74 | 4.93 | 7.17 | 14.6 at 30 ns |
+| ss | 1.49 | 2.68 | 3.94 | 5.12 | 7.36 | 9.73 | 14.10 | 14.2 at 30 ns |
+| ff | 0.47 | 0.90 | 1.33 | 1.76 | 2.55 | 3.37 | 4.93 | 14.7 at 30 ns |
+
+The short settings depend on the delay line, not the clock; the standard pulse is half a clock, so at 33 ns about
+16 ns **(ESTIMATED: half the period minus the gate skew seen at 30 ns)**; measured widths of the final build:
+TBD(final). The row and gate cells after `u_wpx` reshape these further (not timed: latch gates are not endpoints).
+Liberty delay of `dlygate4sd3_1` A → X (rise / fall): tt 0.561 / 0.582 ns, ss 1.071 / 1.158 ns, ff 0.390 / 0.394 ns;
+the latch's own minimum gate pulse is 0.14 ns tt, 0.29 ns ss.
+
+## Latency and the CPU clock it serves (O3, IR-07)
+
+The acknowledge and the prediction leave the chip at the third clock edge after `REQ` arrives: 3 × 33 = 99 ns plus
+output delay. With the pads' round trip and the FPGA's synchroniser a prediction is back within about 130 ns
+**(ESTIMATED: clock periods plus the platform figures of C-03)**. Measured at the pins in co-simulation
+**(VERIFIED in the perceptron round)**: every acknowledge of the CPU runs comes exactly 3 clocks after the request,
+so 4 chip clocks per CPU cycle suffice (7.6 MHz at 30.3 MHz); two requests in one CPU cycle need 7 chip clocks (8 with
+the adapter: 3.8 MHz). The 1 MHz CPU of IR-07 is far inside both.
+
+## What static timing does not cover
+
+- **Latch data and gate pins** (the tables): reported as unconstrained, by design (docs/SPEC.md 6.2). Data and
+  select terms change a full clock before the write pulse and not until half a clock after it.
+- **The twin's tri-state enable** (`einvp_1` TE → Z): disabled in `src/bpx.sdc` as a false path; the condition (no
+  flop takes table read data while the write sequencer is busy) is a proven formal assertion. The data arc and the
+  read paths stay timed.
+- **The delay line and the short pulse gate** (`u_dly`, `u_wpx`): no constrained path runs through them (OpenSTA:
+  no paths), so `bpx.sdc` needed no new exception. Their widths are measured above, and the effect on the latches is
+  a silicon experiment (docs/experiments.md, experiment 5).
+- **The ring oscillators**: combinational loops of named cells, not timed; their divided output enters the clock
+  domain through a synchroniser flop.
+
+**XR-04, XR-05.** The design is fully static: one clock, no minimum frequency; the latches hold without a clock (the
+leaky twin does not, by design, and is off after reset). Every output pin is driven by a flop.

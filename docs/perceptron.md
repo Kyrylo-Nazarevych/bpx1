@@ -6,19 +6,24 @@ the fallback (tag `g3-tage`). This document is the exploration and the decisions
 docs/exploration.md); the numbers measured on the RTL are in docs/cosim.md and docs/verification.md and are the
 ones to quote. Evidence labels as in the requirements specification.
 
+> **Mosaic round (27 Nov 2026):** to make room for the dependability experiments the perceptron was trimmed to
+> 4-bit weights and an 8-bit path history, and binarised inference was removed (section 9). Sections 1–8 record the
+> perceptron round with 5-bit weights; where a value changed, the current one is given in brackets.
+
 ## 1. What was chosen
 
-A **hashed perceptron** (the GEHL family: Seznec's O-GEHL without its dynamic history lengths), 640 bits of its own:
+A **hashed perceptron** (the GEHL family: Seznec's O-GEHL without its dynamic history lengths), 640 bits of its own
+(512 since the trims):
 
 | Part | Value |
 | --- | --- |
-| Weight tables | 4 tables × 32 entries × 5-bit signed weights |
+| Weight tables | 4 tables × 32 entries × 5-bit signed weights (4-bit since the trims) |
 | History per table | 0, 8, 9 and 20 outcomes (table 0 is the bias: identifier only) |
-| Index | identifier bits ⊕ folded outcome history ⊕ folded **path history** (one identifier bit of each of the last 16 branches) |
+| Index | identifier bits ⊕ folded outcome history ⊕ folded **path history** (one identifier bit of each of the last 16 branches; 8 since the trims) |
 | Sum | Σ ±(2w+1) over the four tables, plus the reference predictors as inputs: bimodal counter × 2, gshare counter × 4 (each as 2c−3), tournament prediction ± 4 |
 | Prediction, confidence | sign of the sum; confident if \|sum\| > θ |
 | Training | on a misprediction or when \|sum\| ≤ θ, every selected weight moves one step (saturating) |
-| Threshold θ | adaptive: a 4-bit counter of mispredictions against low-margin hits moves θ (starts at 12, range 1 to 63) |
+| Threshold θ | adaptive: a 4-bit counter of mispredictions against low-margin hits moves θ (starts at 12, range 1 to 63; starts at 10 since the trims) |
 | **Negation in memory** | the outcome just before a table's history segment negates that table's weight: the stored bits are read **complemented** (−(2w+1) = 2(~w)+1), so one stored weight serves two opposite history patterns at the cost of five XOR gates per table and no adder |
 
 The three reference predictors are unchanged and train by their own rules.
@@ -91,7 +96,7 @@ this flow (analog cells would need an analog Tiny Tapeout tile and a different f
 | The history bit negates the stored weight | The weight is read complemented when the history bit is 1: the multiplication of the classic perceptron done by five XOR gates at the table output, no multiplier and no extra adder input. Equivalent to the XNOR of a binarised network, on multi-bit weights. | +0.0015× / +0.36 points for 15 XOR gates per lookup | **In the default** (CTRL bit 13 switches it off) |
 | The history bits select the weight | Short histories go straight to the row select of the table (no hash): the selection is the memory's own decode. | built into the index hash of every candidate with a history of at most 5 bits | Available in the RTL; the chosen histories (8, 9, 20) are longer than the 5 index bits and are folded |
 | Majority of stored bits (binary weights, XNOR and population count) | Each table stores one bit per entry and votes ±1. | 1.1272× / 88.77 % at the same storage; best of the sample 1.1296× / 89.59 % | Rejected as the default: no hysteresis in a 1-bit weight. Per bit a 1-bit entry also costs more area (27 µm² against 22 µm² per bit of a 5-bit entry: the per-entry overhead does not shrink). |
-| Binarised inference with full-precision training | The 5-bit weights train as usual; only their signs vote (a population count instead of the adder). The latent-weight scheme of binarised neural networks. | 1.1272× / 88.75 % | **In the chip as a switchable experiment** (CTRL bit 15, off after reset): the same counters measure both modes on silicon. Costs 4 XOR and a 4-input count. |
+| Binarised inference with full-precision training | The 5-bit weights train as usual; only their signs vote (a population count instead of the adder). The latent-weight scheme of binarised neural networks. | 1.1272× / 88.75 % | Was in the chip as a switchable experiment (CTRL bit 15); **removed in the mosaic round** to make room (section 9). |
 | Sum precomputed when the tables are written | Would need the sum stored per combination of the four table indices; the indices are hashed from different histories, so no entry "owns" a sum. Precomputing the bias plus the bimodal vote per identifier is possible, but they are two small numbers: storing their sum costs more bits than adding them. | analysed | Rejected |
 | Unary (thermometer) weights summed by a population count | A 5-bit weight would take 31 latches; the population count of 4 × 31 bits is larger than the adder of four 6-bit numbers. In-place increment by a shift needs master-slave storage (transparent latches race through). | area estimate: 6× the storage | Rejected |
 | Bit-serial accumulation over several clocks | One small adder, one table per clock. | +3 clocks of latency per prediction | Rejected: latency (objective O3) is worth more than the 1,000 µm² of adder |
@@ -103,18 +108,18 @@ table-specific identifier hashing (no effect, out), a fifth table (out).
 
 ## 5. Switches and the safe mode
 
-Every part beyond the plain hashed perceptron can be switched off over the control port (CTRL bits 15:12), and each
-combination is in the golden model, in the random regression (all 16 combinations, changed while requests run)
-and in the functional coverage:
+Every part beyond the plain hashed perceptron can be switched off over the control port (CTRL bits 14:12; bit 15
+until the mosaic round), and each combination is in the golden model, in the random regression (all combinations,
+changed while requests run) and in the functional coverage:
 
 | CTRL bit | Feature | After reset |
 | --- | --- | --- |
 | 12 | Reference predictors as inputs of the sum | on |
 | 13 | Negation in memory | on |
 | 14 | Adaptive threshold (off: θ stays at the value in raw space 7, word 4, which is writable) | on |
-| 15 | Binarised inference (experiment) | off |
+| 15 | Binarised inference (experiment); removed in the mosaic round, now MASK of the leaky twin (docs/mosaic.md 7.7) | off |
 
-**Safe mode:** bits 12 to 15 = 0 gives the plain hashed perceptron (1.1314× / 89.97 % in the simulator, still
+**Safe mode:** bits 12 to 14 = 0 gives the plain hashed perceptron (1.1314× / 89.97 % in the simulator with 5-bit weights, still
 ahead of every reference). Independently of all of this, CTRL bits 2:0 can make any reference predictor (or static
 not-taken) the driving one: they share no logic with the perceptron's sum, so a defect in the perceptron cannot
 stop the chip serving predictions. Changing a switch needs no reset; the weights keep learning under the new rule
@@ -126,9 +131,9 @@ stop the chip serving predictions. Changing a switch needs no reset; the weights
 | --- | --- | --- |
 | Predictor-specific storage | 576 bits | 640 bits + 16-bit path history (two copies) + 10 bits of threshold |
 | Acknowledge latency | 3 clocks | **3 clocks (unchanged)** |
-| Clock at the slow corner | 25 ns (40 MHz), +4.83 ns | **30 ns (33 MHz), +3.87 ns**; the slowest path is 26.1 ns |
-| Utilisation | 75.6 % | 81.2 % |
-| Time to answer at the pins | 75 ns | **90 ns** |
+| Clock at the slow corner | 25 ns (40 MHz), +4.83 ns | **30 ns (33 MHz), +3.87 ns**; the slowest path is 26.1 ns (mosaic: 33 ns, docs/timing.md) |
+| Utilisation | 75.6 % | 81.2 % (mosaic: docs/area.md) |
+| Time to answer at the pins | 75 ns | **90 ns** (mosaic: 99 ns) |
 
 The sum of four weights and three reference inputs after a table read does not fit 25 ns at the slow corner: a trial
 build at 25 ns ended with −2.58 ns on `CONF` and −1.92 ns on `PRED`, every failing path coming from the gshare
@@ -159,10 +164,46 @@ inside both.
 
 ## 8. Paths for further experiments (not in this chip)
 
-1. A fifth table and 6-bit weights when the area allows (800 bits: +0.13 points; the tile is at 81 %).
+1. A fifth table and 6-bit weights when the area allows (800 bits: +0.13 points; the tile is full with the mosaic).
+
 2. Registering the table outputs and summing in a fourth clock: back to 25 ns and room for more inputs.
 3. A late-select sum: the four possible gshare counter values are compared in parallel and the slow gshare read
    only selects the result; estimated to recover about 2 ns for about 2,000 µm².
 4. A hand-placed weight array with its adder as one hard macro (near-memory summation proper, or the time-domain
    race of section 4): needs a custom layout flow, and the project's decision D4 (no hard macro) would have to change.
 5. Local history as a further input (a per-branch history table): not in the sweeps.
+
+## 9. The trims of the mosaic round (27 Nov 2026)
+
+To make room for the dependability experiments (docs/mosaic.md) the perceptron was trimmed by about 3,300 µm²
+(ESTIMATED in the plan; utilisation measured 81.2 → 74.2 %). The algorithm is otherwise unchanged: same tables,
+histories, index hash, negation in memory, adaptive threshold and training rule.
+
+| Part | Before | After |
+| --- | --- | --- |
+| Weights | 5 bits (−16…15) | **4 bits (−8…7)** |
+| Sum | 9 bits | **8 bits** (\|sum\| ≤ 4 × 15 + 6 + 12 + 4 = 82) |
+| Path history | 16 branches | **8 branches** |
+| Binarised inference (CTRL[15]) | switchable experiment | **removed** |
+| Threshold start | 12 | **10** |
+| Reference-input weights (bimodal, gshare, tournament) | 2, 4, 4 | **2, 4, 4** (step 2 took 2, 3, 3; step 3 went back) |
+
+Threshold start and reference weights were re-chosen by a sweep on the tuning programs (`explore/bpsim`, kind
+`gehlr`, `cb=4 pp=8`): speedup / accuracy, tuning (51) and held-out (18) programs **(VERIFIED, progress log,
+mosaic.md 9 step 2)**:
+
+| Candidate | Tuning | Held-out |
+| --- | --- | --- |
+| before the trims: cb=5 pp=16 θ12 (2,4,4) | 1.13383 / 90.66 | 1.14200 / 93.60 |
+| cb=4 pp=16 θ12 (2,4,4), for reference | 1.13260 / 90.27 | 1.14071 / 93.23 |
+| θ10 (2,3,3), chosen in step 2 | 1.13232 / 90.18 | 1.14025 / 93.05 |
+| θ10 (2,4,4), **on the chip since step 3** | 1.13228 / 90.19 | 1.14021 / 93.03 |
+| other θ ∈ {6, 8, 12} with (2,3,3) or (2,4,4) | 1.13228–1.13232 | 1.14006–1.14025 |
+| (1,3,2), any θ | 1.13207–1.13208 | 1.13996–1.14007 |
+| (1,2,2), any θ | 1.13191–1.13196 | 1.13977–1.13987 |
+
+θ and the (2,3,3)/(2,4,4) choice lie within 0.0001× of speedup: noise. (2,4,4) was taken back in step 3 because ×4 is
+a shift, while ×3 put an adder on the critical path. **All 69 programs, simulator: 1.13439× / 90.93 % against
+1.13596× / 91.42 % before (−0.49 points).** That figure is for (2,3,3); the chip's (2,4,4) gives 90.93 % too
+(90.9322 %, CPU model: fault_campaign.md 2) **(VERIFIED, fault_campaign.md)**. The ablation of section 3 predicted −0.38 points for the 4-bit weights
+alone. Measured on the mosaic's RTL (docs/cosim.md): TBD(final).
