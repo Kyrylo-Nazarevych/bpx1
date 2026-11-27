@@ -34,11 +34,17 @@ module bpx_core #(
     parameter SK  = 0,
     parameter THETA = 10,
     parameter SB  = 8,
-    parameter FEAT = 3'b111,       // features of the default predictor enabled after reset (CTRL[14:12]; CTRL[15] reads 0)
-    parameter STATW = 16           // statistics counter width (16..32)
+    parameter FEAT = 3'b111,       // features of the default predictor enabled after reset (CTRL[14:12])
+    parameter STATW = 16,          // statistics counter width (16..32)
+    parameter [7:0] TWMASK = 8'hF0 // code mask of the leaky twin (bpx_pred), applied while CTRL[15] MASK = 1
 ) (
     input  wire         clk,
     input  wire         rst,       // synchronous, already synchronised
+    input  wire         strap,     // reset strap (docs/mosaic.md 7.7): taken at the last clock edge of rst
+    // ring oscillators (bpx_ro, docs/mosaic.md 7.7): run and select bits out, divided ring and random bit in
+    output wire [2:0]   ro_ctl,    // FCTL[12:10]: {ROSEL, ROB, ROA}
+    input  wire         ro_div,
+    input  wire         ro_rnd,
     // predict port
     input  wire         req_s,     // REQ after two flops
     input  wire [W-1:0] id_d,      // ID after one flop (stable whenever a request is pending)
@@ -66,13 +72,16 @@ module bpx_core #(
   reg        freeze;
   reg  [3:0] dsel0, dsel1;
   reg  [2:0] feat;                  // default predictor: {adaptive threshold, negation by history, reference inputs}
+  reg        mask_en;               // CTRL[15] MASK: the leaky twin's code mask (docs/mosaic.md 7.7)
   reg        srst;                  // soft reset, one cycle
   wire       irst = rst | srst;
   // mosaic (docs/mosaic.md 7.2): FCTL switches the experiments (0 = the plain chip); FSTAT holds sticky fault flags
-  reg  [15:0] fctl;                 // [0] TWIN_EN [1] TWIN_USE [3:2] CODE [4] RESTORE [7:5] PULSE [13] DEMOTE [14] DBGF
-                                    // [15] CTEST; [12:8] storage only (step 5)
+  reg  [15:0] fctl;                 // [0] TWIN_EN [1] TWIN_USE [3:2] CODE [4] RESTORE [7:5] PULSE [8] GRAND [9] GSRC
+                                    // [10] ROA [11] ROB [12] ROSEL [13] DEMOTE [14] DBGF [15] CTEST
   reg  [9:0]  fstat;                // sticky: [0] TW_ERR [1] TW_COR [2] TW_DET [3] TW_SDC [4] CANARY [8:5] checkers [9] WDOG
   reg         lpw;                  // fault event 10: the default prediction of the last predict computed with W3
+  reg         lrb;                  // fault event 9: the random bit of the last training before the last predict
+  reg         kept;                 // FSTAT[11] KEPT: the last reset had the strap and did not clear the tables
   // dependability (docs/mosaic.md 7.5, 7.6): canary, invariant checkers, hang watchdog, demotion
   reg         cap_q;                // PRED and CONF were loaded at the last edge (a predict request was answered)
   reg         ack_q, ackt_q, hs_q;  // handshake checker: ACK, its toggle condition and "ready, no reset" one clock ago
@@ -126,16 +135,21 @@ module bpx_core #(
   wire [7:0]    theta_q;
   wire          train, tk, clr_exec, dwr_tab, misc_we;
   wire [3:0]    tw_flags;
-  wire          p_def3;
+  wire          p_def3, rbit;
+  // reset strap (docs/mosaic.md 7.7): the clear that ends a reset with the strap leaves the tables as they are (the
+  // write-sequencer cycle still runs, with nothing to write); a clear requested by CMD bit 1 always clears
+  wire          clr_tab = clr_exec & ~(kept & init_pend & ~clrp_pend);
+  assign ro_ctl = fctl[12:10];
 
-  bpx_pred #(.W(W), .LGB(LGB), .LGG(LGG), .HG(HG), .NT(NT), .LGT(LGT), .CB(CB), .LV(LV), .HL(HL), .PL(PL), .UBW(UBW), .UGW(UGW), .UTW(UTW), .SK(SK), .THETA(THETA), .SB(SB)) u_pred (
-      .clk(clk), .rst(irst), .feat(feat), .tctl(fctl[4:0]), .tw_flags(tw_flags), .p_def3(p_def3),
+  bpx_pred #(.W(W), .LGB(LGB), .LGG(LGG), .HG(HG), .NT(NT), .LGT(LGT), .CB(CB), .LV(LV), .HL(HL), .PL(PL), .UBW(UBW), .UGW(UGW), .UTW(UTW), .SK(SK), .THETA(THETA), .SB(SB), .TWMASK(TWMASK)) u_pred (
+      .clk(clk), .rst(irst), .feat(feat), .tctl(fctl[4:0]), .tmask(mask_en), .gctl(fctl[9:8]), .rnd(ro_rnd), .rbit(rbit),
+      .tw_flags(tw_flags), .p_def3(p_def3),
       .wcap(wcap), .wact(wact), .wpulse(wpulse), .wpulse_x(wpulse_x),
       .rsel(rsel), .id_p(id_d), .hist_p(sh), .path_p(psh), .id_c(h_id), .hist_c(ch), .path_c(pch),
       .dbg_tab(dspace), .dbg_addr(da), .dbg_rdata(t_rdata),
       .p_def(p_def), .p_bim(p_bim), .p_gsh(p_gsh), .p_trn(p_trn), .conf(p_conf), .look(look),
       .train(train), .taken(tk), .stg(stg),
-      .clr(clr_exec), .dbg_we0(dwr_tab & dwm[0]), .dbg_we1(dwr_tab & dwm[1]), .dbg_wdata(dwd),
+      .clr(clr_tab), .dbg_we0(dwr_tab & dwm[0]), .dbg_we1(dwr_tab & dwm[1]), .dbg_wdata(dwd),
       .tc_q(tc_q), .theta_q(theta_q), .misc_we(misc_we), .misc_wdata(dwd));
 
   // ---------------------------------------------------------------- request decode
@@ -251,7 +265,7 @@ module bpx_core #(
   always @* begin
     case (reg_addr[4:0])
       5'h00:   reg_rdata = 16'hB101;
-      5'h01:   reg_rdata = {1'b0, feat, dsel1, dsel0, freeze, drive};
+      5'h01:   reg_rdata = {mask_en, feat, dsel1, dsel0, freeze, drive};
       5'h03:   reg_rdata = {4'd0, eflags, drd_pend | dwr_pend, wbusy, pending, stg_v, ready, qcnt};
       5'h04:   reg_rdata = {8'd0, err_cnt};
       5'h05:   reg_rdata = sn0[15:0];
@@ -267,7 +281,7 @@ module bpx_core #(
       5'h0f:   reg_rdata = {dinc, 1'b0, dwm, dspace, 1'b0, da};
       5'h10:   reg_rdata = {4'd0, dq};
       5'h11:   reg_rdata = fctl;
-      5'h12:   reg_rdata = {5'd0, dem, fstat};
+      5'h12:   reg_rdata = {4'd0, kept, dem, fstat};
       default: reg_rdata = 16'd0;
     endcase
   end
@@ -284,10 +298,13 @@ module bpx_core #(
   wire [15:0] evt = {do_stage, reg_we | reg_re, lp_n[3], lp_n[2], lp_n[1], lp_n[0], q_empty, stg_v, wact,
                      p_refuse | r_empty | (seen & ~pending & ready), fl_exec, r_misp, r_exec, p_exec, pending & ~seen, 1'b0};
   // fault events (FCTL[14]): 0-3 the twin flags of the predict being acknowledged, 4 canary (in the clock after the
-  // acknowledge), 5 any checker, 6 watchdog, 7 DEMOTED (level), 10 the default prediction with W3 of the last predict
+  // acknowledge), 5 any checker, 6 watchdog, 7 DEMOTED (level), 8 the selected ring oscillator / 256 (asynchronous to
+  // everything else, one synchroniser flop in bpx_ro), 9 the random bit (GSRC's source) of the last training before
+  // the last predict (level), 10 the default prediction with W3 of the last predict (level)
   wire        lpw_n = p_exec ? p_def3 : lpw;
+  wire        lrb_n = p_exec ? rbit : lrb;
   wire [3:0]  tw_ev = tw_flags & {4{p_exec}};
-  wire [15:0] fevt  = {5'd0, lpw_n, 2'd0, dem, wd_hit, chk_any, can_hit, tw_ev};
+  wire [15:0] fevt  = {5'd0, lpw_n, lrb_n, ro_div, dem, wd_hit, chk_any, can_hit, tw_ev};
 
   wire [2:0] qcnt_n = (fl_exec | r_misp) ? 3'd0 : qcnt + {2'b00, p_exec} - {2'b00, r_exec};
   wire       err_ev = p_refuse | r_empty | (seen & ~pending & ready);
@@ -302,9 +319,12 @@ module bpx_core #(
       dsel0     <= 4'd10;                           // DBG0: last prediction of the default predictor
       dsel1     <= 4'd13;                           // DBG1: last prediction of the tournament
       feat      <= FEAT;
+      mask_en   <= 1'b0;
       fctl      <= 16'd0;
       fstat     <= 10'd0;
       lpw       <= 1'b0;
+      lrb       <= 1'b0;
+      kept      <= rst & strap;                     // pin reset: the strap at its last clock edge; soft reset: 0
       cap_q     <= 1'b0;
       hs_q      <= 1'b0;
       wd_cnt    <= 6'd0;
@@ -382,6 +402,7 @@ module bpx_core #(
         psh  <= {psh[PL-2:0], pb_p};
         lp   <= preds;
         lpw  <= p_def3;
+        lrb  <= rbit;
         if (q_empty) begin                          // the predict lookup is the commit lookup
           stg   <= look;
           stg_v <= 1'b1;
@@ -481,7 +502,9 @@ module bpx_core #(
         freeze <= reg_wdata[3];
         dsel0  <= reg_wdata[7:4];
         dsel1  <= reg_wdata[11:8];
-        feat   <= reg_wdata[14:12];         // CTRL[15] (binarised inference, removed) is ignored
+        feat   <= reg_wdata[14:12];
+        mask_en <= reg_wdata[15];           // MASK: like TWIN_EN and CODE it changes the staged twin word: stage again
+        if (reg_wdata[15] != mask_en) stg_v <= 1'b0;
       end
       if (w_fctl) begin
         fctl <= reg_wdata;
@@ -605,6 +628,13 @@ module bpx_core #(
     // ---- RR-03: bounded return to idle-and-ready once the inputs are quiet
     if (f_quiet >= F_N && !f_activity) assert (f_idle);
 
+    // ---- reset values of the mosaic registers (docs/mosaic.md 7.2, 7.7); KEPT is the strap at the last edge of a
+    //      pin reset, 0 after a soft reset, and changes only by a reset; a clear that leaves the tables is the
+    //      clear at the end of a strapped reset and nothing else
+    if ($past(irst)) assert (fctl == 16'd0 && !mask_en && fstat == 10'd0 && !dem && dcnt == 2'd0 && !lpw && !lrb &&
+                             kept == ($past(rst) && $past(strap)) && init_pend);
+    else assert (kept == $past(kept));
+    if (clr_exec && !clr_tab) assert (kept && init_pend && !clrp_pend);
     if (!$past(irst)) begin
       // ---- RR-04: the reply changes only together with ACK
       if (ack == $past(ack)) assert (pred == $past(pred) && conf == $past(conf));
@@ -656,6 +686,8 @@ module bpx_core #(
     cover (r_empty);
     cover (f_rep && p_exec);
     cover (f_rep && f_idle && n_res == 3);
+    // the strap: a reset that keeps the tables ends ready; a later clear by CMD bit 1 clears them
+    cover (kept && ready && clr_exec && clr_tab);
   end
 `ifdef FV_NOSPI
   // Task "nowait": with a silent control port, which requests can be made to wait?  These assertions justify the
@@ -717,8 +749,9 @@ module bpx_shadow #(
 endmodule
 
 // bpx_canary - output flops with canaries (docs/mosaic.md 7.5).  For each bit: the flop u_q takes d; a second flop
-// u_s, clocked by the same edge, takes d through ND delay cells (sky130_fd_sc_hd__dlygate4sd1_1, about 0.24 ns
-// each typical, 0.45 ns at the slow corner; ND = 1).  When the timing margin of d is used up, the shadow samples
+// u_s, clocked by the same edge, takes d through ND delay cells (sky130_fd_sc_hd__dlygate4sd3_1, about 0.57 ns
+// each typical, 1.1 ns at the slow corner; ND = 2 since step 5, with the clock at 33 ns: a lead of about 1.1 ns
+// typical, 2.2 ns slow; step 4 had one dlygate4sd1_1, 0.2 ns, at 30 ns).  When the timing margin of d is used up, the shadow samples
 // the old value while the real flop still gets the new one, so the two differ.  The self-test inverts the shadow's
 // sample with an XOR on its output (inv = CTEST), off the timed path.  All cells are instantiated by name, so that
 // the canary taps exactly the flop's D net.  Behavioural model (simulation, proofs): no delay.
@@ -727,7 +760,7 @@ endmodule
 module bpx_canary #(
     parameter N  = 2,
     /* verilator lint_off UNUSEDPARAM */
-    parameter ND = 1               // delay cells (structural model only)
+    parameter ND = 2               // delay cells (structural model only)
     /* verilator lint_on UNUSEDPARAM */
 ) (
     input  wire         clk,
@@ -752,7 +785,7 @@ module bpx_canary #(
       wire        sq;
       assign c[0] = d[i];
       for (j = 0; j < ND; j = j + 1) begin : g_d
-        (* keep *) sky130_fd_sc_hd__dlygate4sd1_1 u_dly (.A(c[j]), .X(c[j+1]));
+        (* keep *) sky130_fd_sc_hd__dlygate4sd3_1 u_dly (.A(c[j]), .X(c[j+1]));
       end
       (* keep *) sky130_fd_sc_hd__dfxtp_1 u_q (.CLK(clk), .D(d[i]), .Q(q[i]));
       (* keep *) sky130_fd_sc_hd__dfxtp_1 u_s (.CLK(clk), .D(c[ND]), .Q(sq));

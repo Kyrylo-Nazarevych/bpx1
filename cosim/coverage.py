@@ -34,7 +34,19 @@ NOFAULT = "cannot occur without a physical fault (proven); fired by forcing in t
 OUNREACH = {("FSTAT flag set", f): NOFAULT for f in FLAGS[5:10]}
 OUNREACH.update({("FSTAT flag cleared", f): NOFAULT for f in FLAGS[5:10]})
 OUNREACH.update({("fault event seen on DBG", e): NOFAULT for e in (5, 6)})
-EVBIT = {0: 0, 1: 1, 2: 2, 3: 3, 10: 4, 7: 5, 4: 6}     # fault event -> bit of the meta field dseen
+EVBIT = {0: 0, 1: 1, 2: 2, 3: 3, 10: 4, 7: 5, 4: 6, 9: 7, 8: 8}     # fault event -> bit of the meta field dseen
+# mosaic step 5 (docs/mosaic.md 7.7): gshare randomness, oscillators, strap
+OUNREACH[("fault event seen on DBG", 8)] = "no ring runs in this simulation (measured in test.py ring_oscillators)"
+GRAND = {0: ("gshare training", "GRAND off"), 1: ("gshare training, LFSR", "not at a limit"),
+         2: ("gshare training, LFSR", "at a limit, held (bit 0)"), 3: ("gshare training, LFSR", "at a limit, moved (bit 1)"),
+         4: ("gshare training, oscillator bit", "not at a limit"), 5: ("gshare training, oscillator bit", "at a limit, held (bit 0)"),
+         6: ("gshare training, oscillator bit", "at a limit, moved (bit 1)")}
+OUNREACH[GRAND[6]] = "the oscillator bit is 0 in simulation (no ring runs; test.py ring_oscillators drives it)"
+MEV = [("MASK switched", "no clear after it"), ("MASK switched", "predictors cleared after it")]
+PRES = [("pin reset", "strap: tables kept"), ("pin reset", "OP wrong alone: cleared"), ("pin reset", "CSn wrong alone: cleared"),
+        ("pin reset", "MOSI wrong alone: cleared"), ("pin reset", "two or three conditions wrong: cleared"),
+        ("KEPT cleared", "by a pin reset without the strap"), ("KEPT cleared", "by a soft reset"),
+        ("pin reset", "strap while KEPT")]
 DEMB = [("demotion count", "0 -> 1"), ("demotion count", "1 -> 2"), ("demotion count", "2 -> 3"),
         ("demotion", "DEMOTED set by the fourth detected fault"), ("demotion", "fourth fault with DEMOTE = 0: not demoted"),
         ("demotion fault from", "twin TW_DET"), ("demotion fault from", "canary")]
@@ -52,6 +64,8 @@ def main():
             cls, depth, misp, refused, drive, frozen, pred, conf, feat, lowp, squash, rfirst, gap, setup, tcase, tneg, tsh, tsl, tth = v[:19]
             two, code, use, rest, dseen, fset, fclr, tchg = v[19:27] if len(v) >= 27 else (-1, 0, 0, -1, 0, 0, 0, 0)
             cn, deffp, fev, dev, dchg, dno, pref = v[27:34] if len(v) >= 34 else (0, 0, 0, 0, 0, 0, 0)
+            grand, pres = v[34:36] if len(v) >= 36 else (-1, 0)
+            mask, decay, mev = v[36:39] if len(v) >= 39 else (0, -1, 0)
             la = lat[i]
             bp = 1 if la > 3 else 0
             total += 1
@@ -94,7 +108,12 @@ def main():
             prev = cls
             # mosaic: the leaky twin
             if two >= 0:
-                o[("twin read", CODES[code], TWO[two], "TWIN_USE" if use else "observe")] += 1
+                o[("twin read", CODES[code], TWO[two], "TWIN_USE" if use else "observe", f"MASK {mask}")] += 1
+            if decay >= 0:
+                o[("twin nodes all 0 / all 1 read (MASK 0: also the clean words of 0 and -1)", "all 1" if decay else "all 0", f"MASK {mask}", CODES[code])] += 1
+            for k, b in enumerate(MEV):
+                if mev >> k & 1:
+                    o[b] += 1
             if rest >= 0:
                 o[("restore-on-use rewrote", RESTORE[rest])] += 1
             for k in range(len(FLAGS)):
@@ -122,6 +141,12 @@ def main():
                 o[("predict while demoted", "the demotion changed PRED")] += 1
             if dno:
                 o[("predict while demoted", "CTRL selects another predictor: no effect")] += 1
+            # mosaic step 5
+            if grand >= 0:
+                o[GRAND[grand]] += 1
+            for k, b in enumerate(PRES):
+                if pres >> k & 1:
+                    o[b] += 1
     # ---- defined bins
     cb = []
     for cls in range(5):
@@ -146,13 +171,15 @@ def main():
     ob += [("train: a table counts negated", x) for x in (0, 1)] + [("train: a weight already at its maximum", x) for x in (0, 1)]
     ob += [("train: a weight already at its minimum", x) for x in (0, 1)] + [("train: threshold moves", x) for x in (-1, 0, 1)]
     ob += [("sequence", a, b) for a in OPN for b in OPN]
-    ob += [("twin read", CODES[c], TWO[t], u) for c in range(4) for t in TWO_BY_CODE[c] for u in ("observe", "TWIN_USE")]
+    ob += [("twin read", CODES[c], TWO[t], u, f"MASK {k}") for k in (0, 1) for c in range(4) for t in TWO_BY_CODE[c] for u in ("observe", "TWIN_USE")]
+    ob += [("twin nodes all 0 / all 1 read (MASK 0: also the clean words of 0 and -1)", n, f"MASK {k}", CODES[c]) for n in ("all 0", "all 1") for k in (0, 1) for c in range(4)] + MEV
     ob += [("restore-on-use rewrote", r) for r in RESTORE]
     ob += [("FSTAT flag set", f) for f in FLAGS] + [("FSTAT flag cleared", f) for f in FLAGS]
-    ob += [("fault event seen on DBG", e) for e in (0, 1, 2, 3, 4, 5, 6, 7, 10)] + [("TWIN_USE changed the default prediction",)]
+    ob += [("fault event seen on DBG", e) for e in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)] + [("TWIN_USE changed the default prediction",)]
     ob += [("canary fired (CTEST)", x) for x in ("executed predict", "refused predict")] + DEMB + DEMV
     ob += [("predict while demoted", x) for x in ("the tournament drives", "the demotion changed PRED",
                                                   "CTRL selects another predictor: no effect")]
+    ob += [GRAND[k] for k in range(7)] + PRES
     L = ["# BPX-1 functional coverage: bins and hits (VR-02)\n",
          f"Generated by `cosim/coverage.py` from {len(sys.argv) - 1} random runs, {total:,} requests. Definitions: docs/coverage.md.\n",
          "## Required cross: operation × in-flight depth × misprediction × back-pressure\n",

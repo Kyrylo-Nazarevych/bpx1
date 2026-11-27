@@ -289,6 +289,79 @@ and reset.
   resets) and sets KEPT. After power-up the raw port then reads the latches' power-up state; later it is a warm
   reset that keeps what was learned.
 
+**As built in step 5 (owners' changes of 26 Nov, and where the RTL is more precise than the above):**
+
+- GRAND (FCTL[8]) and GSRC (FCTL[9]) as planned, in `bpx_pred`: `g_hold = GRAND & (counter at the limit training
+  moves away from) & ~bit`; the counter is then rewritten unchanged. The LFSR is 7 bits, x^7 + x^6 + 1
+  (`{q[5:0], q6 ^ q5}`), 0x55 after reset and after every clear (like the threshold), and steps once per training
+  (every resolve that trains, i.e. not frozen), whatever FCTL says, so its state never depends on GRAND or GSRC. The
+  random bit is its bit 6 before the step (GSRC = 0) or the oscillator bit (GSRC = 1). gshare feeds the tournament
+  and the reference inputs of the default predictor's sum; with GRAND = 0 nothing changes anywhere. Golden model:
+  exact for the LFSR; the oscillator bit is 0 (`OSC_BIT`), so with GSRC = 1 a counter never leaves its limit in any
+  simulation.
+- Fault event 9, defined: the random bit (of the source GSRC selects, whatever GRAND says) used at the last training
+  before the last executed predict. It is a level that changes only when a predict executes (flop `lrb`, like event
+  10): the bit of the last training is kept in `rb_q` at each training and copied at the predict. In a combined
+  request the predict comes first (also in the RTL, where the resolve may follow in the same clock or later), so the
+  bit of a request's own training shows at the next predict. This is the only definition the golden model can check
+  at the ACK and one clock later whatever the timing: a level that followed each training would change at a deferred
+  resolve, at a time the host does not control. With a predict per training (trace replay, one branch in flight) the
+  FPGA reads one bit per branch, one request late.
+- Ring oscillators (`src/bpx_ro.v`): the probe's ring A twice (`bpx_ring u_ra, u_rb`: nand2 + 4 × (a222oi, xor2,
+  a22oi, nand3) + xnor2, 18 cells, 137.6 µm² each); the probe's ring B is gone, so A (kept running) and B (rested)
+  are identical. FCTL[10] runs A, [11] runs B, [12] selects the ring for the divider and the random bit. Divider and
+  random bit as in the probe (8 ripple toggle flops with an asynchronous reset while the selected ring is stopped;
+  bit 0 through two flops is the random bit); the divided signal (bit 7) gets one synchroniser flop before the DBG
+  flop: fault event 8. The block sits in `bpx_chip`; the core gets the random bit and the divided signal and gives
+  out FCTL[12:10]. Behavioural and formal builds: no rings, both outputs 0 (in the formal top both are free inputs,
+  so the proofs hold whatever they do). Gate-level tests keep FCTL[11:10] = 0 (a running ring is a zero-delay loop
+  with the PDK's models). Latch-cell RTL: `test/sky130_cells_sim.v` gives `xnor2_1` (used nowhere else) a 4 ns
+  inertial delay, one per ring: both rings simulate at 125 MHz; cocotb `ring_oscillators` measures it from event 8.
+  The resizer may not touch the ring cells or nets (`RSZ_DONT_TOUCH_RX = u_dly|u_ro\.u_r[ab]\.([gnr]|u_en|u_dl)`),
+  so the two rings stay cell for cell identical (set before the build, not as a reaction to it: a resized stage in
+  one ring only would spoil the comparison). Each ring's run pins are driven by a named `buf_2` (`u_bf`, not
+  protected): the first build with the whole ring protected stopped in post-placement repair with
+  `[RSZ-3006] Failed to insert buffer before loads for net u_chip.u_core.fctl[11]` (`[ODB-1211] ... Load pin
+  'u_chip.u_ro.u_rb.g_st[0].u1/B' is dont_touch`): the resizer cannot repair a net whose loads are all untouchable.
+- Strap, changed by the owners: OP = 3 (`uio_in[3:2]`) **and** CSn = 0 (`uio_in[4]`) **and** MOSI = 1
+  (`uio_in[6]`) at the last clock edge of reset (OP = 3 alone is an ordinary request code). In `bpx_chip` from the
+  synchronised pins (OP one flop, CSn and MOSI two); the core takes it into `kept` at every clock of a pin reset (the
+  last one counts) and clears it at a soft reset. The reset's clear still runs its write-sequencer cycle (READY at
+  the same clock as before), but its table clear is gated: `clr_tab = clr_exec & ~(kept & init_pend & ~clrp_pend)`,
+  so a clear requested by CMD bit 1, even one that coincides with the reset's, always clears. Everything else resets
+  (histories, threshold, adaptation counter, LFSR, queue, statistics, CTRL, FCTL, FSTAT). FSTAT[11] KEPT is live:
+  set until the next reset without the strap (a soft reset included); CMD bit 2 leaves it. The SPI block after such
+  a reset: it starts with CSn low, no command bit and SCK low; without an SCK edge nothing happens, and the next 8
+  rising SCK edges are a command byte even if CSn never rose (tested). The FPGA must keep SCK low through the reset,
+  hold OP, CSn, MOSI from 4 clocks before `rst_n` rises to 4 clocks after, and should take CSn high for at least 4
+  clocks before its first SPI word (so a stray SCK edge during the release cannot shift the command).
+- Code mask for the twin (owners' item 4, then changed during the step by the owners after their fault campaign:
+  value `8'hF0` and switchable). CTRL[15] (free since binarised inference was removed) is **MASK**, reset 0. With
+  MASK = 1 the nodes hold `code word ^ TWMASK`; TWMASK is one parameter (`bpx_chip`, passed down; the model's
+  `bpx1.TWMASK`, `host/bpx1.py` `TWMASK`), `8'hF0`: the four check bits inverted, data bits untouched, so with
+  CODE 0 nothing changes. Training writes, restore-on-use and the clear carry the mask of the present setting (the
+  twin's clear value comes through its write data, `bpx_ltab` parameter `CLRD = 1`, since it now depends on MASK);
+  the decoder takes it off after the TWIN_EN gate (`tw_c = tw_m ^ (TWMASK & MASK)`; with TWIN_EN = 0 every flag and
+  use stays gated as before). Raw space 12 reads and writes the nodes as they are. A write of CTRL that changes MASK
+  invalidates the staging register (the step-3 rule for TWIN_EN and CODE), because the staged twin word depends on
+  it. Words stored under the other setting read as faulty until rewritten: exact in the golden model; the
+  experimenter clears the predictors (CMD bit 1) after switching MASK. Fully decayed words: with MASK = 0, all-0 and
+  all-1 nodes are the code words of 0 and −1 (no code sees them); with MASK = 1 they read as 0xF0 and 0x0F (syndrome
+  1111, even parity): SEC-DED and detect-all abstain (TW_DET), parity does not see them (tested, `twin_directed`).
+  Cost: one flop and the XORs on the four check bits (write and read side) plus the clear-value mux.- Answers to the owners' two open points (item 5):
+  (a) W0–W2 take `wpulse_x` for every write: training, raw writes (spaces 8–10) and the table clear. So with
+  PULSE ≠ 0 a raw write and a clear by CMD bit 1 use the short pulse. The clear at the end of a reset (pin or soft)
+  always uses the standard pulse: FCTL is already 0 in the clock in which the sequencer copies PULSE and captures
+  the clear. For the experimenter raw writes on the
+  short pulse are what is wanted: writing known patterns at a setting and reading them back measures the write
+  failure rate directly. A clear on the short pulse can leave W0–W2 partly uncleared, which the FPGA twin cannot
+  predict; set PULSE = 0 before CMD bit 1 (or use reset). Making the clear always standard would cost about three
+  gates (force the sequencer's PULSE copy to 0 when it captures a clear: `psel <= clr ? 0 : psel_in`, about
+  20 µm², ESTIMATED); not changed.
+  (b) Yes: TW_DET counts towards demotion with TWIN_USE = 0. The count takes `TW_DET & p_exec` and the twin flags
+  depend only on TWIN_EN and CODE, so in observe mode a detected twin error still counts (and DEMOTED then switches
+  the default predictor to the tournament although the twin's weight was not used). Unchanged.
+
 ## 8. Steps
 
 1. [done] Probe: branch `probe-leaky`, local build clean, pushed for CI.

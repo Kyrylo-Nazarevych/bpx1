@@ -24,7 +24,8 @@
 // captures (wcap).
 //
 // Leaky twin W3L (docs/mosaic.md 7.3): a 32 x 8 table of dynamic cells (bpx_ltab DYN = 1) beside W3, holding the
-// code word {check[3:0], data[3:0]} of W3's weight; same index as W3 in every lookup.  tctl = FCTL[4:0] =
+// code word {check[3:0], data[3:0]} of W3's weight, XOR TWMASK while CTRL[15] MASK = 1 (7.7); same index as W3 in every
+// lookup.  tctl = FCTL[4:0] =
 // {RESTORE, CODE[1:0], TWIN_USE, TWIN_EN}.  With TWIN_EN = 0 its read data is forced to 0 by named AND cells
 // before anything else sees it (the floating nodes are unknown in gate-level simulation).  The decoded twin weight
 // replaces W3's in the lookup sum only with TWIN_USE (or abstains: the term is left out); training always uses the
@@ -36,6 +37,8 @@
 // Write pulses (docs/mosaic.md 7.4): the weight tables 0..NT-2 (W0-W2) take wpulse_x, the output of the pulse
 // selector's own gate (standard width with FCTL[7:5] = 0, shorter otherwise); BC, G, W3 and the twin take wpulse,
 // the standard pulse, structurally.
+//
+// gshare randomness (docs/mosaic.md 7.7): gctl = FCTL[9:8] = {GSRC, GRAND}; see gsh_new below.
 `default_nettype none
 
 module bpx_pred #(
@@ -54,12 +57,17 @@ module bpx_pred #(
     parameter UTW = 4,
     parameter SK  = 0,
     parameter THETA = 10,
-    parameter SB  = 8              // sum bits: |sum| <= NT (2^CB - 1) + 3 UBW + 3 UGW + UTW = 82 < 128
+    parameter SB  = 8,             // sum bits: |sum| <= NT (2^CB - 1) + 3 UBW + 3 UGW + UTW = 82 < 128
+    parameter [7:0] TWMASK = 8'hF0 // with MASK the twin stores code word ^ TWMASK (docs/mosaic.md 7.7; model: bpx1.TWMASK)
 ) (
     input  wire               clk,
-    input  wire               rst,       // synchronous: threshold and its adaptation counter to their initial values
+    input  wire               rst,       // synchronous: threshold, its adaptation counter and the gshare LFSR to their initial values
     input  wire [2:0]         feat,
     input  wire [4:0]         tctl,      // FCTL[4:0]: {RESTORE, CODE[1:0], TWIN_USE, TWIN_EN}
+    input  wire               tmask,     // CTRL[15] MASK: the twin's code mask is applied
+    input  wire [1:0]         gctl,      // FCTL[9:8]: {GSRC, GRAND}
+    input  wire               rnd,       // the oscillator's random bit (clk domain; 0 in every simulation)
+    output wire               rbit,      // the random bit as it was at the last training (fault event 9)
     output wire [3:0]         tw_flags,  // of the current lookup: {TW_SDC, TW_DET, TW_COR, TW_ERR}, 0 unless TWIN_EN
     output wire               p_def3,    // default prediction of the current lookup computed with W3 (not the twin)
     // write sequencer (shared by all tables)
@@ -142,7 +150,16 @@ module bpx_pred #(
   wire       cho_we  = s_pbim != s_pgsh;
   wire [1:0] cho_new = sat2(s_cho, s_pgsh == taken);
   wire [1:0] bim_new = sat2(s_bim, taken);
-  wire [1:0] gsh_new = sat2(s_gsh, taken);
+  // gshare probabilistic hysteresis (docs/mosaic.md 7.7): GRAND = 1, a counter at a limit (0 or 3) that training
+  // would move away from it moves only if the random bit is 1.  The bit: GSRC = 0 a 7-bit maximal-length LFSR
+  // (x^7 + x^6 + 1) that steps once per training; GSRC = 1 the oscillator bit.
+  reg  [6:0] lfsr;
+  reg        rb_q;
+  wire       rb      = gctl[1] ? rnd : lfsr[6];
+  wire       g_away  = taken ? (s_gsh == 2'd0) : (s_gsh == 2'd3);
+  wire       g_hold  = gctl[0] & g_away & ~rb;
+  wire [1:0] gsh_new = g_hold ? s_gsh : sat2(s_gsh, taken);
+  assign rbit = rb_q;
   wire       miss    = s_pdef != taken;
   wire       learn   = miss | s_low;
 
@@ -167,6 +184,17 @@ module bpx_pred #(
   // ---------------------------------------------------------------- threshold adaptation
   wire tc_max = tc == 4'b0111;
   wire tc_min = tc == 4'b1000;
+  // the LFSR and the bit of the last training: reset and clear like the threshold; one step per training
+  always @(posedge clk) begin
+    if (rst | (wcap & clr)) begin
+      lfsr <= 7'h55;
+      rb_q <= 1'b0;
+    end else if (wcap & train) begin
+      lfsr <= {lfsr[5:0], lfsr[6] ^ lfsr[5]};
+      rb_q <= rb;
+    end
+  end
+
   always @(posedge clk) begin
     if (rst | (wcap & clr)) begin
       theta <= THETA;
@@ -296,11 +324,17 @@ module bpx_pred #(
   wire           dw_tw = dw & (dbg_tab == 4'd12);
   wire           tw_rw = ~learn & tw_rst;          // a resolve that trains without writing W3 restores the twin entry
   wire [7:0]     tw_r;                             // raw read: unknown in gate-level simulation
-  // the initial value is the code word of W3's initial value, -1 (table NT-1 always starts at all ones)
-  bpx_ltab #(.AW(LGT), .RW(LGT > 4 ? 3 : 2), .EW0(8), .EW1(0), .INIT(8'hFF), .DYN(1)) u_tw (
+  // Code mask (docs/mosaic.md 7.7): with MASK (CTRL[15]) the nodes hold code word ^ TWMASK, so that a word whose
+  // nodes have all decayed the same way (all 0 or all 1, both code words) is not a code word after the mask is taken
+  // off.  Training writes, restores and the clear value carry the mask of the current setting; raw space 12 reads
+  // and writes the nodes as they are.  The initial value is the code word of W3's initial value, -1 (table NT-1
+  // always starts at all ones); the clear takes it from wdata (CLRD), since it depends on MASK.
+  wire [7:0] tmk = TWMASK & {8{tmask}};
+  bpx_ltab #(.AW(LGT), .RW(LGT > 4 ? 3 : 2), .EW0(8), .EW1(0), .INIT(8'hFF), .DYN(1), .CLRD(1)) u_tw (
       .clk(clk), .wcap(wcap), .wact(wact), .wpulse(wpulse), .clr(clr),
       .we0((train & (learn | tw_rw)) | (dw_tw & dbg_we0)), .we1(1'b0),
-      .waddr(dw ? dbg_addr[LGT-1:0] : ix3_c), .wdata(dw ? dbg_wdata[7:0] : learn ? {hchk(wn3), wn3} : s_tw),
+      .waddr(dw ? dbg_addr[LGT-1:0] : ix3_c),
+      .wdata(clr ? (8'hFF ^ tmk) : dw ? dbg_wdata[7:0] : learn ? ({hchk(wn3), wn3} ^ tmk) : s_tw),
       .raddr(r_dbg ? dbg_addr[LGT-1:0] : r_commit ? ix3_c : ix3_p), .rdata(tw_r));
 
   // TWIN_EN = 0: the read data is forced to 0 here, before anything else sees it
@@ -318,19 +352,21 @@ module bpx_pred #(
 
   // decode by CODE: 0 data as stored; 1 odd parity -> abstain; 2 SEC-DED: odd parity -> correct the single bit,
   // even parity with a non-zero syndrome -> abstain; 3 any non-zero syndrome -> abstain
-  wire [3:0] td  = tw_m[3:0];
-  wire [3:0] syn = hchk(td) ^ tw_m[7:4];
-  wire       par = ^tw_m;
+  wire [7:0] tw_c = tw_m ^ tmk;                    // the code word as read (mask taken off; tmk while TWIN_EN = 0)
+  wire [3:0] td  = tw_c[3:0];
+  wire [3:0] syn = hchk(td) ^ tw_c[7:4];
+  wire       par = ^tw_c;
   wire       snz = |syn;
   wire [3:0] dfl = {syn == 4'b0111, syn == 4'b1011, syn == 4'b1101, syn == 4'b1110};
   wire       sec = tw_code == 2'd2;
   wire [3:0] tdec = td ^ (dfl & {4{sec}});
   wire       tabs = ((tw_code == 2'd1) & par) | (sec & ~par & snz) | ((tw_code == 2'd3) & snz);
   wire       tcor = sec & par;
-  wire       terr = tw_m != {hchk(w3), w3};
+  wire       terr = tw_c != {hchk(w3), w3};
   wire       tsdc = ~tabs & (tdec != w3);
   assign tw_flags = {tsdc, tabs, tcor, terr} & {4{tw_en}};
-  assign look[CB*NT+6+:8] = tcor ? {hchk(tdec), tdec} : tw_m;
+  // the staged restore value, as the nodes are to hold it (masked)
+  assign look[CB*NT+6+:8] = tcor ? ({hchk(tdec), tdec} ^ tmk) : tw_m;
 
   // ---------------------------------------------------------------- lookup result
   // TWIN_USE: the decoded twin weight replaces W3's (an abstaining twin leaves the term out); p_def3 is the
@@ -349,6 +385,15 @@ module bpx_pred #(
                      (dbg_tab == 4'd12) ? {4'd0, tw_m} : dbg_t;
 
   wire _unused = &{1'b0, l_low, s_conf, s_ptrn, s_palt, dbg_addr, dbg_wdata, misc_wdata};
+
+`ifdef FORMAL
+  // the LFSR never locks up at 0 (the step keeps a non-zero state non-zero; reset and clear load 0x55)
+  reg f_rs_p = 1'b0;
+  always @(posedge clk) begin
+    if (rst) f_rs_p <= 1'b1;
+    if (f_rs_p) assert (lfsr != 7'd0);
+  end
+`endif
 endmodule
 
 // bpx_fold - XOR of the consecutive OW-bit slices of v.

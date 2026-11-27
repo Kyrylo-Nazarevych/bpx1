@@ -152,22 +152,26 @@ single steps. Raw table reads use cycles the predict port leaves free and never 
 | Addr | Name | Access | Content |
 | --- | --- | --- | --- |
 | 0x00 | ID | R | `0xB101` |
-| 0x01 | CTRL | RW | `[2:0]` driving predictor: 0 default, 1 bimodal, 2 gshare, 3 tournament, 4–7 static not-taken; `[3]` freeze learning; `[7:4]` DBG0 event; `[11:8]` DBG1 event; `[14:12]` features of the default predictor (section 7): `[12]` reference inputs, `[13]` negation in memory, `[14]` adaptive threshold; `[15]` unused (reads 0, writes ignored). After reset: `0x7DA0`. |
+| 0x01 | CTRL | RW | `[2:0]` driving predictor: 0 default, 1 bimodal, 2 gshare, 3 tournament, 4–7 static not-taken; `[3]` freeze learning; `[7:4]` DBG0 event; `[11:8]` DBG1 event; `[14:12]` features of the default predictor (section 7): `[12]` reference inputs, `[13]` negation in memory, `[14]` adaptive threshold; `[15]` MASK: the leaky twin's code mask (space 12 below; docs/mosaic.md 7.7). A write that changes MASK invalidates the staging register, like FCTL[0] and FCTL[3:2]; twin words stored before the change read as faulty until rewritten, so clear the predictors (CMD bit 1) after switching it. After reset: `0x7DA0`. |
 | 0x02 | CMD | W | bit 0 soft reset; bit 1 clear predictors (tables, histories, in-flight work); bit 2 clear statistics, error flags, FSTAT, the fault count and DEMOTED; bit 3 snapshot the statistics; bit 4 snapshot and clear the counters in one step (no event lost or counted twice) |
 | 0x03 | STATUS | R | `[2:0]` in-flight count; `[3]` ready; `[4]` staging valid; `[5]` request pending; `[6]` table write in progress; `[7]` raw access pending; `[8]` resolve refused (queue empty); `[9]` predict refused (queue full); `[10]` request withdrawn; `[11]` statistics overflow (flags are sticky) |
 | 0x04 | ERRCNT | R | `[7:0]` refused or withdrawn requests, saturating |
 | 0x05–0x0E | STATS | R | Snapshot taken by CMD bit 3, two words (low, high) per counter: resolved branches, then mispredictions of default, bimodal, gshare, tournament. Counters are 16 bits and saturate (never wrap; overflow is flagged in STATUS). For exact totals of longer runs use snapshot-and-clear at least every 65,535 branches and add the snapshots up (FR-08). |
 | 0x0F | RAW_ADDR | RW | `[6:0]` entry; `[11:8]` space: 0 bimodal+chooser, 1 gshare, 7 small registers, 8–11 weight tables 0–3, 12 the leaky twin of W3; `[13:12]` field write enables; `[15]` address + 1 after each RAW_DATA read |
 | 0x10 | RAW_DATA | RW | Read: the addressed entry (fetched after RAW_ADDR is written and after each read). Write: the entry fields enabled in RAW_ADDR. |
-| 0x11 | FCTL | RW | Mosaic experiments (docs/mosaic.md 7.2); 0 = the plain chip. `[0]` TWIN_EN: the leaky twin's read data is let through (otherwise forced to 0); `[1]` TWIN_USE: the default predictor sums the twin's weight instead of W3's (needs `[0]`); `[3:2]` CODE of the twin: 0 none, 1 parity → abstain, 2 SEC-DED, 3 detect all → abstain; `[4]` RESTORE: restore-on-use; `[7:5]` PULSE: write pulse of the weight tables W0–W2: 0 standard (half a clock), 1–7 shortened to the delay of 1, 2, 3, 4, 6, 8, 12 delay cells (docs/mosaic.md 7.4; a silicon experiment, no effect on the function in simulation; the other tables always get the standard pulse); `[13]` DEMOTE: after the fourth detected fault the tournament drives wherever CTRL selects the default predictor (docs/mosaic.md 7.6); `[14]` DBGF: the DBG selections of CTRL index the fault events; `[15]` CTEST: canary self-test, the canary fires in the clock after every answered predict request; `[12:8]`: storage only in this version (functions planned: gshare randomness, oscillators). Reset 0, also by soft reset. A write that changes `[0]` or `[3:2]` invalidates the staging register (it is read again). |
-| 0x12 | FSTAT | R | Fault flags, cleared by CMD bit 2 and by reset: `[0]` TW_ERR a predict read a twin word that is not the code word of W3's weight; `[1]` TW_COR SEC-DED corrected the word; `[2]` TW_DET the code detected an error it did not correct (the weight abstained); `[3]` TW_SDC the twin's weight was not abstained and differed from W3's (bits 0–3 set only at executed predicts with TWIN_EN = 1); `[4]` CANARY: a canary flop of PRED or CONF disagreed with its flop in the clock after a predict was answered (timing margin used up, or CTEST); `[5]` queue checker (count above 4, or FULL inconsistent with it); `[6]` staging checker (staging valid or a resolve pending with an empty queue, or resolve-first done with no request waiting); `[7]` write-sequencer checker (two sequencer states at once, or a table write requested while a write is in progress); `[8]` handshake checker (ACK toggled without answering a request, or a request was answered without toggling ACK); `[9]` WDOG: a request stayed pending for 64 clocks with no control-port write in between; `[10]` DEMOTED (live: the demotion count reached its fourth fault with DEMOTE = 1; the tournament drives while DEMOTE = 1). Bits 0–9 are sticky. The checkers and the watchdog cannot fire without a physical fault (formal proof). CMD bit 2 also clears the fault count (docs/mosaic.md 7.6). `[15:11]` read 0. |
+| 0x11 | FCTL | RW | Mosaic experiments (docs/mosaic.md 7.2); 0 = the plain chip. `[0]` TWIN_EN: the leaky twin's read data is let through (otherwise forced to 0); `[1]` TWIN_USE: the default predictor sums the twin's weight instead of W3's (needs `[0]`); `[3:2]` CODE of the twin: 0 none, 1 parity → abstain, 2 SEC-DED, 3 detect all → abstain; `[4]` RESTORE: restore-on-use; `[7:5]` PULSE: write pulse of the weight tables W0–W2: 0 standard (half a clock), 1–7 shortened to the delay of 1, 2, 3, 4, 6, 8, 12 delay cells (docs/mosaic.md 7.4; a silicon experiment, no effect on the function in simulation; the other tables always get the standard pulse); `[13]` DEMOTE: after the fourth detected fault the tournament drives wherever CTRL selects the default predictor (docs/mosaic.md 7.6); `[14]` DBGF: the DBG selections of CTRL index the fault events; `[15]` CTEST: canary self-test, the canary fires in the clock after every answered predict request; `[8]` GRAND: gshare probabilistic hysteresis, a gshare counter at a limit (0 or 3) that training would move away from it moves only if the random bit is 1; `[9]` GSRC: the random bit is 0 bit 6 of a 7-bit LFSR (x^7 + x^6 + 1, 0x55 after reset and clear, one step per training whatever FCTL says), 1 the oscillator bit (the selected ring's divider bit 0 through two flops); `[10]` ROA, `[11]` ROB: ring oscillator A, B runs (two identical rings; A is meant to be kept running, B rested); `[12]` ROSEL: the divider (fault event 8) and the oscillator bit take ring 0 = A, 1 = B (docs/mosaic.md 7.7). Reset 0, also by soft reset. A write that changes `[0]` or `[3:2]` invalidates the staging register (it is read again). |
+| 0x12 | FSTAT | R | Fault flags, cleared by CMD bit 2 and by reset: `[0]` TW_ERR a predict read a twin word that is not the code word of W3's weight; `[1]` TW_COR SEC-DED corrected the word; `[2]` TW_DET the code detected an error it did not correct (the weight abstained); `[3]` TW_SDC the twin's weight was not abstained and differed from W3's (bits 0–3 set only at executed predicts with TWIN_EN = 1); `[4]` CANARY: a canary flop of PRED or CONF disagreed with its flop in the clock after a predict was answered (timing margin used up, or CTEST); `[5]` queue checker (count above 4, or FULL inconsistent with it); `[6]` staging checker (staging valid or a resolve pending with an empty queue, or resolve-first done with no request waiting); `[7]` write-sequencer checker (two sequencer states at once, or a table write requested while a write is in progress); `[8]` handshake checker (ACK toggled without answering a request, or a request was answered without toggling ACK); `[9]` WDOG: a request stayed pending for 64 clocks with no control-port write in between; `[10]` DEMOTED (live: the demotion count reached its fourth fault with DEMOTE = 1; the tournament drives while DEMOTE = 1). Bits 0–9 are sticky. The checkers and the watchdog cannot fire without a physical fault (formal proof). CMD bit 2 also clears the fault count (docs/mosaic.md 7.6). `[11]` KEPT (live): the last reset had the reset strap and kept the tables (section 5); CMD bit 2 leaves it, the next reset without the strap (soft reset included) clears it. `[15:12]` read 0. |
 
 Raw entries: space 0 `{chooser[1:0], bimodal[1:0]}`; space 1 `gshare[1:0]`; weight tables `w[3:0]` (two's
 complement, write enable bit 12). Space 7: 0–1 committed outcome history, 2–3 speculative outcome history (12 bits
 per word), 4 `{theta[5:0], adaptation counter[3:0]}` (writable), 5 committed path history, 7 speculative path history (6 and 8, the upper path-history
 words, read 0), 9 queue pointers and flags. Space 12, the leaky twin W3L (32 entries, docs/mosaic.md 7.3):
-`{check[3:0], data[3:0]}`, the code word of W3's weight, check bit k = XOR of the three data bits other than
-`data[k]`; reads 0 unless FCTL[0]; written (write enable bit 12) whatever FCTL says. A raw write of W3 (space 11)
+the node values `{check[3:0], data[3:0]}`, the code word of W3's weight (check bit k = XOR of the three data bits
+other than `data[k]`), XOR the code mask TWMASK while CTRL[15] MASK = 1 (TWMASK is an 8-bit parameter of the RTL,
+`8'hF0` in this version: the four check bits inverted, so that a word whose nodes have all decayed the same way, all
+0 or all 1, is no code word and SEC-DED and detect-all abstain; with MASK = 0 both are valid code words). Every write
+by the chip (training, restore-on-use, the clear) applies the mask of the present setting, the decoder takes it off
+before decoding; raw reads and writes of space 12 see the nodes as they are. Reads 0 unless FCTL[0]; written (write enable bit 12) whatever FCTL says. A raw write of W3 (space 11)
 leaves the twin as it is, so faults can be injected into either. Every bit of predictor state and
 configuration is readable while requests run (FR-10); tables and the two small predictor registers are writable.
 
@@ -181,8 +185,11 @@ Fault events (the same selections when FCTL[14] = 1, same timing rule as the sta
 after PRED and CONF were loaded); 5 any invariant checker; 6 WDOG (a pulse every 64 clocks while a request hangs);
 both one clock after they happen; 7 DEMOTED (a level; with the `ACK` of a predict it shows the state before that
 predict, one clock later including that predict's own TW_DET); 10 the default prediction of the last predict
-computed with W3 instead of the twin (equal to event 10 of the standard bank unless TWIN_USE changed it); 8, 9 and
-11–15 read 0 in this version (planned: divided oscillator, random bit). A detected fault (TW_DET of a predict,
+computed with W3 instead of the twin (equal to event 10 of the standard bank unless TWIN_USE changed it); 8 the
+selected ring oscillator divided by 256 (asynchronous: one synchroniser flop, then the DBG flop; 0 while that ring is
+stopped); 9 the random bit (of the source GSRC selects, whatever GRAND says) used at the last training before the
+last executed predict (a level that changes only with the `ACK` of a predict; in a combined request the predict comes
+first, so the bit of that request's own training shows at the next predict); 11–15 read 0. A detected fault (TW_DET of a predict,
 CANARY, any checker, WDOG) increments a 2-bit saturating count; the fourth with DEMOTE = 1 sets DEMOTED.
 
 ## 5. Reset, ready, `ena`
@@ -190,7 +197,21 @@ CANARY, any checker, WDOG) increments a 2-bit saturating count; the fourth with 
 `rst_n` is asserted asynchronously to nothing: it is synchronised (2 flops) and used as a synchronous reset.
 After release, the chip clears every table (one write pulse, section 6.2), sets `ACK := REQ`, then raises `READY`:
 a fixed number of clocks (stated with the RTL), independent of the host (FR-12). A soft reset from the control port
-does the same. `ena` is not used inside the design (Tiny Tapeout powers and selects the project around it; the
+does the same.
+
+**Reset strap** (docs/mosaic.md 7.7). If at the last clock edge of reset OP = 3 (`uio_in[3:2]`), CSn = 0
+(`uio_in[4]`) and MOSI = 1 (`uio_in[6]`), the clear that ends the reset leaves the tables as they are (bimodal and
+chooser, gshare, W0–W3, the leaky twin); everything else resets as usual (histories, threshold and its adaptation
+counter, the gshare LFSR, in-flight work, statistics, CTRL, FCTL, FSTAT) and FSTAT[11] KEPT is set until the next
+reset without the strap. After power-up the tables then show the latches' power-up state; later it is a warm reset
+that keeps what was learned. OP = 3 alone is an ordinary request code a host may leave on the pins; the three
+together are not a state of an idle SPI port. Timing: the chip takes OP through one flop and CSn, MOSI through two,
+and the reset through two, so the pins must be stable from 4 clocks before `rst_n` rises until 4 clocks after it.
+SCK must stay low throughout. The control port after such a reset: it starts with CSn low and no command bit
+received, and without an SCK edge nothing happens; the next 8 SCK rising edges are taken as a command byte even if
+CSn never rose (checked in test.py `strap_reset`). The FPGA should nevertheless take CSn high for at least 4 clocks
+before its first SPI word, as every word does anyway, so that a stray SCK edge during the release cannot shift the
+command. A soft reset is a reset without the strap. `ena` is not used inside the design (Tiny Tapeout powers and selects the project around it; the
 template requires nothing else).
 
 ## 6. Microarchitecture
@@ -300,7 +321,7 @@ reference tables train as above. The speculative path history is repaired with t
 **Features (CTRL[14:12]).** `[12]` = 0 removes the three reference terms from the sum. `[13]` = 0 sets every
 `neg_i` to 0. `[14]` = 0 stops the threshold adapting (θ stays; it is writable through raw space 7). All 8
 combinations are in the golden model and are verified alike. (CTRL[15], binarised inference until 26 Nov 2026, was
-removed in the mosaic round.) **Safe mode:** `[14:12] = 0`, the plain hashed perceptron; or any reference predictor driving
+removed in the mosaic round; since step 5 it is MASK, the leaky twin's code mask, section 4.) **Safe mode:** `[14:12] = 0`, the plain hashed perceptron; or any reference predictor driving
 (CTRL[2:0]), which shares no logic with the sum.
 
 **Sizes of the references, and why.** Bimodal + chooser 256 bits, gshare 256 bits: the reference tournament has 512
@@ -312,8 +333,9 @@ would score 1.0 point more, a 4096-entry one 1.9 more); the gshare history of 4 
 
 The area by block, the build settings and the measured utilisation are in docs/area.md; the clock and the critical
 path in docs/timing.md. In short **(VERIFIED there)**: the perceptron design builds clean with all checks at zero;
-the sum of the perceptron in the predict cycle sets the clock period at 30 ns (33 MHz) at the slow corner, with the
-acknowledge still at the third clock: 90 ns from request to answer.
+the sum of the perceptron in the predict cycle sets the clock period, signed off at the slow corner: 33 ns (30.3 MHz)
+since mosaic step 5 (was 30 ns; the mosaic's leaky twin sits in the predict cycle too, and the canaries need a lead),
+with the acknowledge still at the third clock: 99 ns from request to answer. The FPGA sets the real clock.
 
 ## 9. The U1 CPU: the contract the FPGA team builds (FR-03, VR-06)
 

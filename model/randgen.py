@@ -12,6 +12,8 @@ out.ops is played against the RTL by `cosim --rand` (cosim/cosim.cpp), one line 
   S / C  resolved m0 m1 m2 m3 errors flags queue     snapshot (S) or snapshot-and-clear (C), then compare
   D space count w...             read `count` raw words of a state space and compare (FR-10)
   G addr value                   read one register (FCTL, FSTAT) and compare
+  Z s                            a pin reset; s bit 0: OP = 3 (else OP = s >> 3), bit 1: CSn = 0, bit 2: MOSI = 1 while
+                                 reset ends (all three: the reset strap, the tables are kept; docs/mosaic.md 7.7)
 Mosaic (docs/mosaic.md 7.2, 7.3): FCTL changes in mid-stream (twin on/off, TWIN_USE, CODE, RESTORE, the fault-event
 bank on DBG with random event selections, random storage bits), fault injection by raw writes of single, double
 and triple bit flips into twin words (space 12) and of new weights into W3 (space 11), FSTAT reads, and clears of
@@ -20,7 +22,10 @@ write-pulse settings (no effect here), the canary self-test CTEST and DEMOTE in 
 sequences: the default predictor drives, the twin is on with SEC-DED or detect-all and DEMOTE, then double-bit
 errors are injected into the twin entries that coming predicts read (or CTEST is set) until the fourth detected
 fault demotes the chip; the tournament then drives; later CMD bit 2 (or, in `conc` runs and in the stretch without
-clears, DEMOTE = 0) ends it.  Environment RG_PLAIN=1: none of this (FCTL stays 0; the steps are those of the
+clears, DEMOTE = 0) ends it.  Step 5 (docs/mosaic.md 7.7): GRAND and GSRC in the random FCTL values (the LFSR exact,
+the oscillator bit 0), fault events 8 and 9 among the DBG selections, pin resets with the strap or with a wrong
+strap condition (not in `conc` runs); CTRL[15] MASK (the twin's code mask) in random CTRL writes and switched in
+mid-stream with and without a following clear, and fully decayed twin words (all nodes 0 or 1).  Environment RG_PLAIN=1: none of this (FCTL stays 0; the steps are those of the
 generator before the mosaic, plus reads of space 12, FCTL and FSTAT).
 With `conc` the control port works while the requests run (FR-10 during a live run): no foreground statistics
 steps; instead background jobs that `cosim --rand` starts and does not wait for (dropped if one is still running):
@@ -75,6 +80,11 @@ def main():
     dev = [0]                                            # demotion events since the last request (coverage):
                                                          # 1 suspended (DEMOTE 1 -> 0 while DEMOTED), 2 resumed
     dem_end = [None]                                     # request count at which a demotion sequence is ended
+    mev = [0]                                            # MASK switched since the last request: 1 without, 2 with a clear
+    pres = [0]                                           # resets since the last request (coverage): 1 strap (kept),
+                                                         # 2/4/8 OP/CSn/MOSI alone wrong, 16 two or three wrong,
+                                                         # 32 KEPT cleared by a pin reset, 64 by a soft reset,
+                                                         # 128 a strapped reset while KEPT
 
     def clear_stats():
         fclr[0] |= m.fstat_reg
@@ -88,7 +98,7 @@ def main():
         ops.write(f"W 17 {f}\n")
         m.write_fctl(f)
         if f & bpx1.FCTL_DBGF:
-            ev = [0, 1, 2, 3, 4, 7, 10]
+            ev = [0, 1, 2, 3, 4, 7, 8, 9, 9, 10]
             want = [rng.choice(ev) if rng.random() < 0.85 else rng.randrange(16) for _ in range(2)]
         else:
             want = [10, 13]                              # the standard events the model tracks
@@ -99,7 +109,8 @@ def main():
     def new_fctl():
         if rng.random() < 0.15:
             return 0
-        # bits 8-12 without a function yet (storage only), the write-pulse setting [7:5] (no effect in this model)
+        # random: GRAND, GSRC [9:8] (the gshare randomness: LFSR exact, oscillator bit 0), the ring bits [12:10] and the
+        # write-pulse setting [7:5] (no effect in this model: no ring runs, every pulse writes)
         f = rng.getrandbits(16) & ~(0x401F | bpx1.FCTL_DEMOTE | bpx1.FCTL_CTEST)
         f |= (1 if rng.random() < 0.85 else 0) | (2 if rng.random() < 0.5 else 0) | (rng.randrange(4) << 2)
         f |= (16 if rng.random() < 0.5 else 0) | (bpx1.FCTL_DBGF if rng.random() < 0.4 else 0)
@@ -141,17 +152,37 @@ def main():
         else:
             set_fctl(m.fctl & ~bpx1.FCTL_DEMOTE)         # suspended: DEMOTED stays, the default predictor drives
 
+    def pin_reset():
+        """A pin reset (cosim step Z) with the strap (OP = 3, CSn = 0, MOSI = 1 at its last clock edge: the tables are
+        kept) or with one, two or three of the conditions wrong (an ordinary clearing reset)."""
+        k = rng.random()
+        s = 7 if k < 0.5 else rng.choice([6, 5, 3]) if k < 0.9 else rng.choice([0, 1, 2, 4])
+        ops.write(f"Z {s | (rng.randrange(3) << 3)}\n")   # bits 4:3: the OP value when bit 0 says OP is wrong
+        strap = s == 7
+        b = 1 if strap else {6: 2, 5: 4, 3: 8}.get(s, 16)
+        if m.kept:
+            b |= 128 if strap else 32
+        pres[0] |= b
+        fclr[0] |= m.fstat_reg
+        m.reset(strap=strap)
+        if rng.random() < 0.5:
+            dump()
+
     def raw_wr(space, a, v):
         ops.write(f"W 15 {0x3000 | (space << 8) | a}\nW 16 {v}\n")
         m.raw_write(space, a, v)
 
     def inject():
-        """A fault by raw write: 1, 2 or 3 flipped bits of a twin word, or a new weight in W3 (twin unchanged)."""
+        """A fault by raw write: 1, 2 or 3 flipped bits of a twin word, a fully decayed twin word (all nodes 0 or all
+        1), or a new weight in W3 (twin unchanged)."""
         if rng.random() < 0.7:                           # an entry a coming predict is likely to read
             a = m._lookup(rng.choice(ids), m.sh, m.psh).idx[-1]
         else:
             a = rng.randrange(N3)
-        if rng.random() < 0.8:
+        k = rng.random()
+        if k < 0.12:
+            raw_wr(bpx1.SPACE_TWIN, a, rng.choice([0x00, 0xFF]))
+        elif k < 0.8:
             nb = rng.choice([1, 1, 1, 2, 2, 3])
             mask = sum(1 << b for b in rng.sample(range(8), nb))
             raw_wr(bpx1.SPACE_TWIN, a, m.tw[a] ^ mask)
@@ -233,8 +264,8 @@ def main():
             if m.fctl & bpx1.FCTL_DBGF:
                 p0, p1 = m.dbg_pins(post=True)
                 for k, v, pv in zip(m.dsel, (d0, d1), (p0, p1)):
-                    if v and k in (0, 1, 2, 3, 10):
-                        dseen |= 1 << (4 if k == 10 else k)
+                    if v and k in (0, 1, 2, 3, 8, 9, 10):
+                        dseen |= 1 << {10: 4, 9: 7, 8: 8}.get(k, k)
                     if (v or pv) and k == bpx1.EV_DEMOTED:
                         dseen |= 1 << 5
                     if pv and k == bpx1.EV_CANARY:
@@ -242,6 +273,7 @@ def main():
             tchg = 1 if m.last_preds[0] != m.last_pdef3 else 0
         ops.write(f"R {op} {arg} {exp} {gap} {setup}\n")
         two = m.last_tw["outcome"] if (pexec and m.last_tw) else -1
+        decay = (1 if m.last_tw["raw"] == 0xFF else 0) if (two >= 0 and m.last_tw["raw"] in (0x00, 0xFF)) else -1
         rest = t["restore"] if t is not None else -1
         # demotion and canary (coverage): fault outcomes of this request, bit 0-2 count steps 0->1, 1->2, 2->3, bit 3
         # DEMOTED set, bit 4 fourth fault with DEMOTE = 0 (blocked), bit 5 a fault from the twin, bit 6 from the canary
@@ -254,9 +286,12 @@ def main():
                    f"{rfirst} {gap} {setup} {tr[0]} {tr[1]} {tr[2]} {tr[3]} {tr[4]} "
                    f"{two} {m.code} {1 if m.twin_use else 0} {rest} {dseen} {m.fstat_reg & ~fs0} {fclr[0]} {tchg} "
                    f"{1 if m.last_canary else 0} {1 if (pexec and deff) else 0} {fev} {dev[0]} {dchg} "
-                   f"{1 if (pexec and dno) else 0} {1 if (op != bpx1.OP_SPECIAL and rep.refused & bpx1.ERR_PREDICT_FULL) else 0}\n")
+                   f"{1 if (pexec and dno) else 0} {1 if (op != bpx1.OP_SPECIAL and rep.refused & bpx1.ERR_PREDICT_FULL) else 0} "
+                   f"{t.get('grand', -1) if t is not None else -1} {pres[0]} {1 if m.mask else 0} {decay} {mev[0]}\n")
         fclr[0] = 0
         dev[0] = 0
+        pres[0] = 0
+        mev[0] = 0
 
     def drain():
         while m.queue:
@@ -293,6 +328,21 @@ def main():
                 n += demote_seq()
                 dem_end[0] = n + rng.randint(4, 80)
                 continue
+            if 0.0078 <= r < 0.0090 and not conc and clear_ok:
+                pin_reset()                              # resets the statistics: not in `conc` runs
+                continue
+            if 0.0090 <= r < 0.0100:
+                # MASK (CTRL[15]) switched in mid-stream: words stored under the old setting read as faulty until they
+                # are rewritten; half the time the predictors are cleared after it, as an experimenter would
+                m.mask = not m.mask
+                ops.write(f"W 1 {m.ctrl_word()}\n")
+                if rng.random() < 0.5:
+                    ops.write("W 2 2\n")
+                    m.clear_predictors()
+                    mev[0] |= 2
+                else:
+                    mev[0] |= 1
+                continue
             if r < 0.0062:
                 ops.write(f"G 17 {m.fctl}\n")
                 continue
@@ -303,6 +353,12 @@ def main():
                 a = m._lookup(m.queue[0]["id"], m.ch, m.pch).idx[-1]
                 raw_wr(bpx1.SPACE_TWIN, a, m.tw[a] ^ (1 << rng.randrange(8)))
                 f = m.fctl | bpx1.FCTL_RESTORE
+                if rng.random() < 0.5:                   # or MASK (CTRL[15]), which follows the same staging rule
+                    set_fctl((f & ~(3 << 2)) | bpx1.FCTL_TWIN_EN | (bpx1.CODE_SECDED << 2))
+                    m.mask = not m.mask
+                    mev[0] |= 1
+                    ops.write(f"W 1 {m.ctrl_word()}\n")
+                    continue
                 f ^= rng.choice([bpx1.FCTL_TWIN_EN, 2 << 2, 1 << 2, 3 << 2])
                 set_fctl(f | (bpx1.FCTL_TWIN_EN if rng.random() < 0.5 else 0))
                 continue
@@ -315,7 +371,13 @@ def main():
             m.frozen = rng.random() < 0.15
             m.feat = rng.choice([cfg.FEAT] * 6 + list(range(8)))
             # CTRL[15] (removed binarised inference) is set now and then: the chip must ignore it
-            ops.write(f"W 1 {m.ctrl_word() | (0x8000 if rng.random() < 0.3 else 0)}\n")
+            # CTRL[15] is MASK (the twin's code mask); RG_PLAIN keeps it 0 (the draw stays, so the stream is the same)
+            mk = rng.random() < 0.3
+            if not plain:
+                if mk != m.mask:
+                    mev[0] |= 1
+                m.mask = mk
+            ops.write(f"W 1 {m.ctrl_word()}\n")
             continue
         if conc and r < 0.0025:
             continue
@@ -365,6 +427,8 @@ def main():
         if r < 0.00298 and clear_ok:
             ops.write("W 2 1\n")                         # soft reset
             fclr[0] |= m.fstat_reg
+            if m.kept:
+                pres[0] |= 64                            # a soft reset is a reset without the strap: KEPT goes
             m.reset()
             continue
         n += 1

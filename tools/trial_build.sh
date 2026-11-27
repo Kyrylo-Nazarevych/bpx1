@@ -10,7 +10,7 @@ S=~/work/bpx1
 D=~/work/bpx1-trial-$TAG
 rm -rf $D; mkdir -p $D/src $D/docs $D/test
 ln -s ~/work/tt-branch-predictor/tt $D/tt
-cp $S/src/bpx_ltab.v $S/src/bpx_pred.v $S/src/bpx_core.v $S/src/bpx_spi.v $S/src/bpx_chip.v $D/src/
+cp $S/src/bpx_ltab.v $S/src/bpx_pred.v $S/src/bpx_core.v $S/src/bpx_spi.v $S/src/bpx_ro.v $S/src/bpx_chip.v $D/src/
 cat > $D/src/project.v <<'EOF'
 `default_nettype none
 module tt_um_kyrylo_nazarevych_bpx1 (
@@ -26,7 +26,7 @@ module tt_um_kyrylo_nazarevych_bpx1 (
   bpx_chip u_chip (.ui_in(ui_in), .uo_out(uo_out), .uio_in(uio_in), .uio_out(uio_out), .uio_oe(uio_oe), .ena(ena), .clk(clk), .rst_n(rst_n));
 endmodule
 EOF
-sed -e 's/^    - "bpx_ltab.v"$/    - "bpx_ltab.v"\n    - "bpx_pred.v"\n    - "bpx_core.v"\n    - "bpx_spi.v"\n    - "bpx_chip.v"/' -e 's/"tt_um_kyrylo_nazarevych_bpx1.v"/"project.v"/' $S/info.yaml > $D/info.yaml
+sed -e 's/^    - "bpx_ltab.v"$/    - "bpx_ltab.v"\n    - "bpx_pred.v"\n    - "bpx_core.v"\n    - "bpx_spi.v"\n    - "bpx_ro.v"\n    - "bpx_chip.v"/' -e 's/"tt_um_kyrylo_nazarevych_bpx1.v"/"project.v"/' $S/info.yaml > $D/info.yaml
 # drive-strength-1 gates allowed: the PDK's synthesis exclusion list without its plain _1 logic gates and flop
 T=$PDK_ROOT/$PDK/libs.tech/openlane/sky130_fd_sc_hd
 grep -v -E '__(a[0-9]+[a-z]*|o[0-9]+[a-z]*|and[0-9]b*|or[0-9]b*|nand[0-9]b*|nor[0-9]b*|xor2|xnor2|inv|dfxtp)_1$' $T/no_synth.cells > $D/src/synth_exclude_small.cells

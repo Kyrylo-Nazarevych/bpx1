@@ -15,7 +15,7 @@ export O=${OUT:-out/cosim}; mkdir -p $O out/cosim
 K=${1:-8}; shift || true
 if [ ! -x $BIN ] || [ cosim/cosim.cpp -nt $BIN ] || [ src/bpx_core.v -nt $BIN ] || [ src/bpx_pred.v -nt $BIN ]; then
   verilator --cc --exe --build -O3 -Wno-fatal -Wno-WIDTHEXPAND -Wno-UNUSEDSIGNAL -DBPX_BEHAV --top-module bpx_chip \
-    -CFLAGS "-O2" --Mdir out/cosim/obj -o cosim src/bpx_ltab.v src/bpx_pred.v src/bpx_core.v src/bpx_spi.v src/bpx_chip.v cosim/cosim.cpp > out/cosim/build.log 2>&1 \
+    -CFLAGS "-O2" --Mdir out/cosim/obj -o cosim src/bpx_ltab.v src/bpx_pred.v src/bpx_core.v src/bpx_spi.v src/bpx_ro.v src/bpx_chip.v cosim/cosim.cpp > out/cosim/build.log 2>&1 \
     || { tail -20 out/cosim/build.log; exit 1; }
 fi
 PROGS="$@"; [ -z "$PROGS" ] && PROGS=$(ls out/bench | grep -v -E '^summary|^\.' )

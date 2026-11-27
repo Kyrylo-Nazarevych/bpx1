@@ -3,8 +3,8 @@
 
   "PL_TARGET_DENSITY_PCT": 84,
 
-  "//": "30 ns = 33 MHz: the clock at which the slow corner (ss, 100 C, 1.60 V) closes with margin, with the perceptron sum in the predict cycle (docs/timing.md).",
-  "CLOCK_PERIOD": 30,
+  "//": "33 ns = 30.3 MHz (owners, 27 Nov 2026; was 30 ns): the slow corner (ss, 100 C, 1.60 V) closes with margin with the perceptron sum and the leaky twin in the predict cycle, and the canaries get a lead of about 1 ns typical (docs/mosaic.md 7.5, step 5).",
+  "CLOCK_PERIOD": 33,
 
   "//": "Hold margins halved and fan-out limit raised from 10 to 16: 4,300 um2 fewer repair buffers (trial B).",
   "PL_RESIZER_HOLD_SLACK_MARGIN": 0.05,
@@ -21,8 +21,8 @@
   "PNR_SDC_FILE": "dir::bpx.sdc",
   "SIGNOFF_SDC_FILE": "dir::bpx.sdc",
 
-  "//": "The delay cells of the write-pulse selector and of the canaries (instances u_dly, docs/mosaic.md 7.4, 7.5) are their delay: the resizer may not resize or remove them.",
-  "RSZ_DONT_TOUCH_RX": "u_dly",
+  "//": "The delay cells of the write-pulse selector and of the canaries (instances u_dly, docs/mosaic.md 7.4, 7.5) are their delay, and the two ring oscillators (u_ro.u_ra, u_ro.u_rb, 7.7) must stay cell for cell identical: the resizer may not resize, remove or buffer them.",
+  "RSZ_DONT_TOUCH_RX": "u_dly|u_ro\\.u_r[ab]\\.([gnr]|u_en|u_dl)",
 
   "RUN_LINTER": 1,
   "LINTER_INCLUDE_PDK_MODELS": 1,

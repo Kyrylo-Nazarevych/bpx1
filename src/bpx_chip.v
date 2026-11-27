@@ -12,6 +12,8 @@
 //   ID, OP           1 flop; used only in cycles where the synchronised REQ shows a pending request, by which
 //                    time the pins have been stable for more than a clock period (the host holds them until ACK)
 //   CSn, SCK, MOSI   2 flops each; the control port samples them, SCK is not used as a clock
+//   OP, CSn, MOSI    also form the reset strap, taken by the core at the last clock edge of rst: the pins must be
+//                    stable from 4 clocks before rst_n rises until 4 clocks after (docs/SPEC.md)
 `default_nettype none
 
 module bpx_chip #(
@@ -32,7 +34,9 @@ module bpx_chip #(
     parameter THETA = 10,
     parameter SB  = 8,
     parameter FEAT = 3'b111,       // features of the default predictor enabled after reset (CTRL[14:12])
-    parameter STATW = 16
+    parameter STATW = 16,
+    parameter [7:0] TWMASK = 8'hF0 // code mask of the leaky twin: with CTRL[15] MASK it stores code word ^ TWMASK (docs/mosaic.md 7.7;
+                                   // the golden model's bpx1.TWMASK must be the same value)
 ) (
     input  wire [7:0] ui_in,
     output wire [7:0] uo_out,
@@ -77,8 +81,18 @@ module bpx_chip #(
       .clk(clk), .rst(rst), .sck(sck_s), .mosi(mosi_s), .csn(csn_s), .miso(miso),
       .addr(reg_addr), .we(reg_we), .re(reg_re), .wdata(reg_wdata), .rdata(reg_rdata));
 
-  bpx_core #(.W(W), .LGB(LGB), .LGG(LGG), .HG(HG), .NT(NT), .LGT(LGT), .CB(CB), .LV(LV), .HL(HL), .PL(PL), .UBW(UBW), .UGW(UGW), .UTW(UTW), .SK(SK), .THETA(THETA), .SB(SB), .FEAT(FEAT), .STATW(STATW)) u_core (
-      .clk(clk), .rst(rst), .req_s(req_s), .id_d(id_d[W-1:0]), .op_d(op_d),
+  // reset strap (docs/mosaic.md 7.7): OP = 3, CSn = 0 and MOSI = 1 at the last clock edge of reset keep the tables
+  // (OP alone is an ordinary request code that a host may leave on the pins)
+  wire strap = (op_d == 2'b11) & ~csn_s & mosi_s;
+
+  // ring oscillators, divider and random bit (docs/mosaic.md 7.7)
+  wire [2:0] ro_ctl;
+  wire       ro_div, ro_rnd;
+  bpx_ro u_ro (.clk(clk), .run_a(ro_ctl[0]), .run_b(ro_ctl[1]), .sel(ro_ctl[2]), .div(ro_div), .rnd(ro_rnd));
+
+  bpx_core #(.W(W), .LGB(LGB), .LGG(LGG), .HG(HG), .NT(NT), .LGT(LGT), .CB(CB), .LV(LV), .HL(HL), .PL(PL), .UBW(UBW), .UGW(UGW), .UTW(UTW), .SK(SK), .THETA(THETA), .SB(SB), .FEAT(FEAT), .STATW(STATW), .TWMASK(TWMASK)) u_core (
+      .clk(clk), .rst(rst), .strap(strap), .ro_ctl(ro_ctl), .ro_div(ro_div), .ro_rnd(ro_rnd),
+      .req_s(req_s), .id_d(id_d[W-1:0]), .op_d(op_d),
       .ack(ack), .pred(pred), .conf(conf), .full(full), .ready(ready), .dbg(dbg), .lastp(lastp),
       .reg_addr(reg_addr), .reg_we(reg_we), .reg_re(reg_re), .reg_wdata(reg_wdata), .reg_rdata(reg_rdata));
 

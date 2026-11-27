@@ -1,8 +1,16 @@
-// Behavioural models of the few SKY130 cells that src/ instantiates by name (bpx_ltab.v, bpx_pred.v, bpx_core.v).
+// Behavioural models of the few SKY130 cells that src/ instantiates by name (bpx_ltab.v, bpx_pred.v, bpx_core.v,
+// bpx_ro.v).
 // Used only for RTL simulation without the PDK (the cocotb RTL test, Verilator).  The gate-level test and the
 // chip flow use the PDK's own models and never read this file.
 `default_nettype none
 `timescale 1ns / 1ps
+
+module sky130_fd_sc_hd__buf_2 (
+    input  wire A,
+    output wire X
+);
+  assign X = A;
+endmodule
 
 module sky130_fd_sc_hd__and2_1 (
     input  wire A,
@@ -120,6 +128,17 @@ module sky130_fd_sc_hd__dlygate4sd1_1 (
     output wire X
 );
   assign #0.24 X = A;
+endmodule
+
+// The ring oscillators' delay stage (src/bpx_ro.v): an inertial delay of 4 ns that stands for a whole ring (the
+// other cell models have none), so that a running ring is never a zero-delay loop: each ring (one such stage)
+// simulates at 125 MHz.  Use xnor2_1 by name nowhere else, or it inherits this delay.
+module sky130_fd_sc_hd__xnor2_1 (
+    input  wire A,
+    input  wire B,
+    output wire Y
+);
+  assign #4 Y = ~(A ^ B);
 endmodule
 /* verilator lint_on ASSIGNDLY */
 

@@ -154,6 +154,7 @@ static void wait_ready() {
 // Background jobs (lines "X ..." of the steps file) run while the requests go on; what they read is written to
 // the log with the window of requests it may reflect, and cosim/conc_check.py compares it with the model.
 // "G addr value" reads one register (FCTL 0x11, FSTAT 0x12) in the foreground and compares it.
+// "Z s" is a pin reset with OP, CSn and MOSI set as s says (the reset strap when all three hold; model/randgen.py).
 static char bg_kind = 0; static int bg_a = 0, bg_b = 0, bg_c = 0;
 static u64 bg_jobs = 0, bg_dropped = 0;
 static void bg_idle() { int n = 0; while (bg_busy()) { tick(); if (++n > 100000) { fprintf(stderr, "control port stuck\n"); exit(3); } } }
@@ -243,6 +244,17 @@ static int rand_play(const char* path, const char* latpath, const char* clpath) 
             spi(a, false, &g, 1);
             if (g != e) { if (!sbad) fprintf(stderr, "line %llu: register 0x%02x is %04x, model %04x\n", (unsigned long long)line, a, g, e); sbad++; }
             nstat++;
+        } else if (c == 'Z') {                               // a pin reset with the strap pins (docs/mosaic.md 7.7)
+            int s;
+            if (fscanf(f, "%d", &s) != 1) return 2;
+            int op = (s & 1) ? 3 : ((s >> 3) & 3);
+            // OP, CSn and MOSI held from 4 clocks before rst_n falls until 6 clocks after it rises; SCK low
+            uio = (op << 2) | ((s & 2) ? 0 : 0x10) | ((s & 4) ? 0x40 : 0); drive(top->ui_in);
+            for (int k = 0; k < 4; k++) tick();
+            top->rst_n = 0; for (int k = 0; k < 8; k++) tick();
+            top->rst_n = 1; for (int k = 0; k < 6; k++) tick();
+            uio = 0x10; drive(top->ui_in);
+            wait_ready(); nw++;
         } else if (c == 'D') {
             int space, cnt;
             if (fscanf(f, "%d %d", &space, &cnt) != 2) return 2;

@@ -19,21 +19,33 @@ SUB_NOP, SUB_FLUSH, SUB_RESOLVE_NT, SUB_RESOLVE_T = 0, 1, 2, 3
 DRV_DEFAULT, DRV_BIMODAL, DRV_GSHARE, DRV_TOURNAMENT, DRV_NOT_TAKEN = 0, 1, 2, 3, 4
 ERR_RESOLVE_EMPTY, ERR_PREDICT_FULL, ERR_WITHDRAWN = 1, 2, 4
 # switchable parts of the default predictor (CTRL[14:12]); all off = the plain hashed perceptron ("safe mode").
-# CTRL[15] (binarised inference until the mosaic round) is gone: it reads 0 and writes to it are ignored.
+# CTRL[15] (binarised inference until the mosaic round) is MASK since step 5: the leaky twin's code mask (TWMASK).
 FEAT_REF, FEAT_SX, FEAT_DYN = 1, 2, 4
 FEAT_MASK = 7
 # mosaic experiments (register FCTL, docs/mosaic.md 7.2); FCTL = 0 is the plain chip
 FCTL_TWIN_EN, FCTL_TWIN_USE, FCTL_CODE_SHIFT, FCTL_RESTORE, FCTL_DBGF = 1, 2, 2, 16, 0x4000
 # write-pulse setting of W0-W2 (FCTL[7:5], no effect on the model: a silicon experiment), demotion, canary self-test
 FCTL_PULSE_SHIFT, FCTL_DEMOTE, FCTL_CTEST = 5, 0x2000, 0x8000
+# step 5 (docs/mosaic.md 7.7): gshare probabilistic hysteresis and its random source (0 the LFSR, 1 the oscillator
+# bit), the two ring oscillators' run bits and the divider's selection (no effect on the model: in every simulation
+# the rings stand still and the oscillator bit is 0)
+FCTL_GRAND, FCTL_GSRC, FCTL_ROA, FCTL_ROB, FCTL_ROSEL = 0x100, 0x200, 0x400, 0x800, 0x1000
+LFSR_INIT = 0x55                      # the gshare LFSR (x^7 + x^6 + 1) after reset and clear; bit 6 is the random bit
+OSC_BIT = 0                           # the oscillator's random bit as every simulation sees it
+# code mask of the leaky twin: with CTRL[15] MASK = 1 the nodes hold code word ^ TWMASK (the RTL parameter TWMASK of bpx_chip; one value
+# for RTL, model, tests and harness).  Raw space 12 reads and writes the nodes as they are.
+TWMASK = 0xF0
+CTRL_MASK = 0x8000
 CODE_NONE, CODE_PARITY, CODE_SECDED, CODE_DETECT = 0, 1, 2, 3
 # sticky fault flags (register FSTAT) and fault events 0-3 on the DBG pins
 TW_ERR, TW_COR, TW_DET, TW_SDC = 1, 2, 4, 8
 # FSTAT 4-10 (docs/mosaic.md 7.5, 7.6): canary, the four invariant checkers, watchdog (sticky); DEMOTED (live).
 # The checkers and the watchdog never fire without a physical fault (proven), so the model never sets them.
 CANARY, CHK_QUEUE, CHK_STAGE, CHK_WSEQ, CHK_HANDSHAKE, WDOG, DEMOTED = 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400
-# fault events on DBG (FCTL[14]): 0-3 twin flags, 4 canary, 5 any checker, 6 watchdog, 7 DEMOTED, 10 default with W3
-EV_CANARY, EV_CHECKER, EV_WDOG, EV_DEMOTED, EV_DEF_W3 = 4, 5, 6, 7, 10
+KEPT = 0x800                          # FSTAT[11] (live): the last reset had the strap and kept the tables
+# fault events on DBG (FCTL[14]): 0-3 twin flags, 4 canary, 5 any checker, 6 watchdog, 7 DEMOTED, 8 the divided
+# oscillator (0 here), 9 the random bit of the last training before the last predict, 10 default with W3
+EV_CANARY, EV_CHECKER, EV_WDOG, EV_DEMOTED, EV_DIV, EV_RAND, EV_DEF_W3 = 4, 5, 6, 7, 8, 9, 10
 SPACE_TWIN = 12
 # decode outcomes of one twin read (coverage and tests): see twin_outcome()
 TWO_CLEAN, TWO_COR_DATA, TWO_COR_CHECK, TWO_ABSTAIN, TWO_MISCOR, TWO_SILENT, TWO_MASKED = range(7)
@@ -72,6 +84,11 @@ def tw_decode(word: int, code: int):
     if code == CODE_DETECT:
         return d, syn != 0, False
     return d, False, False
+
+
+def tw_store(d: int, mask: bool) -> int:
+    """The node values of the twin entry that holds weight d: its code word, ^ TWMASK with MASK."""
+    return tw_encode(d) ^ (TWMASK if mask else 0)
 
 
 def tw_flip_kind(word: int) -> int:
@@ -167,10 +184,19 @@ class Bpx1:
         nt = len(c.weights)
         # tables start alternately at 0 and -1 (contributions +1 and -1): the sum starts near zero
         self.wt = [[0 if (i & 1) == (nt & 1) else -1] * e for i, (e, _) in enumerate(c.weights)]
-        # leaky twin of the last weight table (W3L): the code word of each entry's weight; never leaks here
-        self.tw = [tw_encode(self.wt[-1][0])] * c.weights[-1][0]
+        # leaky twin of the last weight table (W3L): the node values, code word of each entry's weight ^ TWMASK;
+        # never leaks here
+        self.tw = [self.node_word(self.wt[-1][0])] * c.weights[-1][0]   # under the present MASK
+        self._clear_registers()
+
+    def _clear_registers(self):
+        """The predictor registers that every reset and every clear set to their initial values (the reset strap
+        keeps only the tables)."""
+        c = self.cfg
         self.theta = c.THETA
         self.tc = 0
+        self.lfsr = LFSR_INIT                    # gshare randomness (docs/mosaic.md 7.7): one step per training
+        self.last_rbit = 0                       # the random bit at the last training
         self.pch = 0                             # committed path history
         self.psh = 0                             # speculative path history
         self.ch = 0                              # committed history, bit 0 = most recent outcome
@@ -192,9 +218,17 @@ class Bpx1:
         self.dcnt = 0                            # detected faults, saturating at 3 (docs/mosaic.md 7.6)
         self.dem = False                         # DEMOTED (FSTAT bit 10)
 
-    def reset(self):
-        """Pin reset or soft reset: predictor state, statistics and settings."""
-        self.clear_predictors()
+    def reset(self, strap: bool = False):
+        """Pin reset or soft reset: predictor state, statistics and settings.  strap = True: a pin reset with the
+        reset strap (OP = 3, CSn = 0, MOSI = 1 at its last clock edge; docs/mosaic.md 7.7): the tables (bimodal and
+        chooser, gshare, W0-W3, the twin) keep their contents, everything else resets, and KEPT is set until the
+        next reset without the strap.  A soft reset (CMD bit 0) is a reset without the strap."""
+        self.mask = False                        # CTRL[15] MASK resets first: the reset's clear writes unmasked words
+        if strap:
+            self._clear_registers()
+        else:
+            self.clear_predictors()
+        self.kept = strap
         self.clear_stats()
         self.drive = DRV_DEFAULT
         self.frozen = False
@@ -203,7 +237,8 @@ class Bpx1:
         self.fctl = 0
         self.last_preds = [0, 0, 0, 0]
         self.last_pdef3 = 0                      # fault event 10
-        self.last_twf = 0                        # twin flags of the last executed predict (fault events 0-3)
+        self.last_ev9 = 0                        # fault event 9: last_rbit as it was at the last executed predict
+        self.last_twf = 0                       # twin flags of the last executed predict (fault events 0-3)
         self.last_tw = None                      # the twin's read at the last executed predict (None: TWIN_EN = 0)
         self.last_canary = False                 # the canary fired at the last predict request (fault event 4)
         self.last_dem0 = self.last_dem1 = False  # DEMOTED at the last executed predict: before it, after its TW_DET
@@ -226,9 +261,18 @@ class Bpx1:
         self.fctl = value & 0xFFFF
 
     @property
+    def tmk(self):
+        """The code mask in effect (CTRL[15] MASK): TWMASK or 0."""
+        return TWMASK if self.mask else 0
+
+    def node_word(self, w: int) -> int:
+        """The twin's node values for weight w under the present MASK (what training and the clear write)."""
+        return tw_store(w, self.mask)
+
+    @property
     def fstat_reg(self):
-        """FSTAT as the chip reads it: the sticky bits and DEMOTED (bit 10)."""
-        return self.fstat | (DEMOTED if self.dem else 0)
+        """FSTAT as the chip reads it: the sticky bits, DEMOTED (bit 10) and KEPT (bit 11)."""
+        return self.fstat | (DEMOTED if self.dem else 0) | (KEPT if self.kept else 0)
 
     @property
     def demoted(self):
@@ -254,16 +298,17 @@ class Bpx1:
 
     def twin_outcome(self, raw: int, w3: int):
         """What the decoder makes of a twin word against W3's weight w3 (4-bit pattern) under the present CODE:
-        (data, abstain, corrected, flags, outcome)."""
-        d, ab, cor = tw_decode(raw, self.code)
-        flags = (TW_ERR if raw != tw_encode(w3) else 0) | (TW_COR if cor else 0) | (TW_DET if ab else 0) | \
+        (data, abstain, corrected, flags, outcome).  raw: the node values (the mask is taken off here)."""
+        cw = raw ^ self.tmk
+        d, ab, cor = tw_decode(cw, self.code)
+        flags = (TW_ERR if cw != tw_encode(w3) else 0) | (TW_COR if cor else 0) | (TW_DET if ab else 0) | \
                 (TW_SDC if not ab and d != w3 else 0)
-        if raw == tw_encode(w3):
+        if cw == tw_encode(w3):
             o = TWO_CLEAN
         elif ab:
             o = TWO_ABSTAIN
         elif cor:
-            o = (TWO_COR_DATA if tw_flip_kind(raw) == 3 else TWO_COR_CHECK) if d == w3 else TWO_MISCOR
+            o = (TWO_COR_DATA if tw_flip_kind(cw) == 3 else TWO_COR_CHECK) if d == w3 else TWO_MISCOR
         elif d != w3:
             o = TWO_SILENT
         else:
@@ -346,14 +391,14 @@ class Bpx1:
                 else:
                     tr["sat_lo"] += w == self.wmin
                     t[L.idx[i]] = max(w - 1, self.wmin)
-            self.tw[i3] = tw_encode(self.wt[-1][i3])     # the twin is written with W3, whatever FCTL says
+            self.tw[i3] = self.node_word(self.wt[-1][i3])  # the twin is written with W3, whatever FCTL says
         elif self.twin_en and self.fctl & FCTL_RESTORE:
             # restore-on-use: rewrite the twin entry with the word read at the commit lookup, corrected if SEC-DED
-            # corrected it (odd parity), otherwise as read
+            # corrected it (odd parity), otherwise as read (the nodes as they were)
             raw = self.tw[i3]
-            d, ab, cor = tw_decode(raw, self.code)
-            new = tw_encode(d) if cor else raw
-            tr["restore"] = 0 if raw == tw_encode(self.wt[-1][i3]) else 1 if cor else 2
+            d, ab, cor = tw_decode(raw ^ self.tmk, self.code)
+            new = self.node_word(d) if cor else raw
+            tr["restore"] = 0 if raw == self.node_word(self.wt[-1][i3]) else 1 if cor else 2
             self.tw[i3] = new
         if self.feat & FEAT_DYN:                  # adaptive threshold: balance misses against low-margin hits
             if miss:
@@ -372,12 +417,25 @@ class Bpx1:
                         tr["th"] = -1
                 else:
                     self.tc -= 1
-        self.last_train = tr
         # classic reference predictors, every branch (FR-07)
         if L.p_bim != L.p_gsh:
             self.cho[L.bi] = self._sat(self.cho[L.bi], L.p_gsh == taken, 3)
         self.bim[L.bi] = self._sat(self.bim[L.bi], taken, 3)
-        self.gsh[L.gi] = self._sat(self.gsh[L.gi], taken, 3)
+        # gshare probabilistic hysteresis (docs/mosaic.md 7.7): with GRAND a counter at a limit that training would
+        # move away from it moves only if the random bit is 1; the bit is the LFSR's bit 6 (GSRC = 0) or the
+        # oscillator bit (GSRC = 1, 0 here).  The LFSR steps once per training, whatever FCTL says.
+        rb = OSC_BIT if self.fctl & FCTL_GSRC else (self.lfsr >> 6) & 1
+        g = self.gsh[L.gi]
+        away = (g == 0 and taken) or (g == 3 and not taken)
+        if self.fctl & FCTL_GRAND:
+            tr["grand"] = (1 + (1 if self.fctl & FCTL_GSRC else 0) * 3 + (1 + rb if away else 0))
+        else:
+            tr["grand"] = 0
+        if not (self.fctl & FCTL_GRAND and away and not rb):
+            self.gsh[L.gi] = self._sat(g, taken, 3)
+        self.lfsr = ((self.lfsr << 1) | (((self.lfsr >> 6) ^ (self.lfsr >> 5)) & 1)) & 0x7F
+        self.last_rbit = rb
+        self.last_train = tr
 
     # ------------------------------------------------------------------ operations
     def _hmask(self):
@@ -400,6 +458,7 @@ class Bpx1:
         self.queue.append(dict(id=ident & ((1 << self.cfg.W) - 1), preds=preds, pdrv=pdrv))
         self.last_preds = preds                    # on the pins: DBG0, PBIM, PGSH, DBG1 after reset
         self.last_pdef3 = L.p_def3
+        self.last_ev9 = self.last_rbit             # before the resolve of a combined request (predict first)
         self.last_tw = L.tw
         self.last_twf = L.tw["flags"] if L.tw else 0
         self.fstat |= self.last_twf
@@ -481,20 +540,24 @@ class Bpx1:
 
     def ctrl_word(self):
         """The CTRL register for the present settings."""
-        return self.drive | (8 if self.frozen else 0) | (self.dsel[0] << 4) | (self.dsel[1] << 8) | ((self.feat & FEAT_MASK) << 12)
+        return self.drive | (8 if self.frozen else 0) | (self.dsel[0] << 4) | (self.dsel[1] << 8) | ((self.feat & FEAT_MASK) << 12) | \
+            (CTRL_MASK if self.mask else 0)
 
     def write_ctrl(self, value: int):
-        """A write of CTRL as the chip takes it (CTRL[15] is ignored)."""
+        """A write of CTRL as the chip takes it (CTRL[15] is MASK: words stored before a change read as faulty until
+        they are rewritten; the experimenter clears the predictors after switching it)."""
         self.drive, self.frozen, self.feat = value & 7, bool(value & 8), (value >> 12) & FEAT_MASK
         self.dsel = [(value >> 4) & 15, (value >> 8) & 15]
+        self.mask = bool(value & CTRL_MASK)
 
     def dbg_event(self, k: int, post: bool = False):
         """Value of DBG event k as the pins show it together with the ACK of an accepted predict (post = False) or
         one clock later (post = True).  Fault events (FCTL[14] = 1): 0-3 the twin flags of that predict (pulses with
         the ACK); 4 the canary (a pulse one clock after the ACK); 5 and 6, checker and watchdog, never fire here;
         7 DEMOTED (a level: with the ACK as it was before this predict, one clock later including the predict's own
-        TW_DET, not yet its canary); 10 its default prediction with W3 (a level); the others 0.  Standard events:
-        10-13 the four predictions (levels); None for a standard event the model does not track."""
+        TW_DET, not yet its canary); 8 the divided oscillator (0: no ring runs in simulation); 9 the random bit of
+        the last training before this predict (a level); 10 its default prediction with W3 (a level); the others 0.
+        Standard events: 10-13 the four predictions (levels); None for a standard event the model does not track."""
         if self.fctl & FCTL_DBGF:
             if k < 4:
                 return 0 if post else (self.last_twf >> k) & 1
@@ -502,6 +565,8 @@ class Bpx1:
                 return 1 if (post and self.last_canary) else 0
             if k == EV_DEMOTED:
                 return 1 if (self.last_dem1 if post else self.last_dem0) else 0
+            if k == EV_RAND:
+                return self.last_ev9
             return self.last_pdef3 if k == EV_DEF_W3 else 0
         return self.last_preds[k - 10] if 10 <= k <= 13 else None
 
@@ -531,7 +596,7 @@ class Bpx1:
         if space == 7:
             return [self.ch & 0xfff, self.ch >> 12, self.sh & 0xfff, self.sh >> 12, (self.tc & 0xf) | (self.theta << 4),
                     self.pch & 0xfff, self.pch >> 12, self.psh & 0xfff, self.psh >> 12][addr]
-        if space == SPACE_TWIN:                   # the twin's 8 bits, read as 0 unless TWIN_EN
+        if space == SPACE_TWIN:                   # the twin's 8 nodes (code word ^ TWMASK), read as 0 unless TWIN_EN
             return self.tw[addr] if self.twin_en else 0
         return self.wt[space - 8][addr] & ((1 << c.CB) - 1)
 
@@ -549,7 +614,8 @@ class Bpx1:
             if addr == 4:
                 self.tc = (value & 0xf) - (16 if value & 8 else 0)
                 self.theta = (value >> 4) & 0x3f
-        elif space == SPACE_TWIN:                 # whatever FCTL says; a write of W3 (space 11) leaves the twin
+        elif space == SPACE_TWIN:                 # the nodes as given (no mask), whatever FCTL says; a write of W3
+                                                  # (space 11) leaves the twin
             if mask & 1:
                 self.tw[addr] = value & 0xFF
         else:

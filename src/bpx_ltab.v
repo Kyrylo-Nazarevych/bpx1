@@ -19,7 +19,8 @@
 // Read: combinational, rdata = entry[raddr].  The control logic never uses a read taken in a cycle 2 of any write,
 // so a read never looks through a transparent latch.
 //
-// clr = 1 (captured like a write) loads INIT into every entry with one pulse.
+// clr = 1 (captured like a write) loads INIT into every entry with one pulse (CLRD = 1: wdata, which the user then
+// sets to the clear value while clr is high; the leaky twin's clear value depends on the code mask switch).
 //
 // DYN = 1: dynamic (leaky) storage, an experiment.  Each bit is the output node of a tri-state inverter
 // (sky130_fd_sc_hd__einvp_1) that is enabled only during the write pulse; afterwards the node floats and holds
@@ -36,7 +37,8 @@ module bpx_ltab #(
     parameter EW0 = 2,                         // field 0 width (>= 1)
     parameter EW1 = 0,                         // field 1 width (0 = no second field)
     parameter [EW0+EW1-1:0] INIT = 0,          // value after clr
-    parameter DYN = 0                          // 1: dynamic storage nodes instead of latches
+    parameter DYN = 0,                         // 1: dynamic storage nodes instead of latches
+    parameter CLRD = 0                         // 1: clr loads wdata (a run-time value) instead of INIT
 ) (
     input  wire               clk,
     input  wire               wcap,            // capture the write request at this clock edge
@@ -66,7 +68,7 @@ module bpx_ltab #(
       we0_q   <= we0;
       we1_q   <= we1;
       waddr_q <= waddr;
-      wdata_q <= clr ? INIT : wdata;
+      wdata_q <= (clr && CLRD == 0) ? INIT : wdata;
     end
   end
 

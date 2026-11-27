@@ -21,11 +21,20 @@ CMD_SOFT_RESET, CMD_CLEAR_PRED, CMD_CLEAR_STATS, CMD_SNAPSHOT, CMD_SNAPSHOT_CLEA
 # mosaic experiments (docs/mosaic.md 7.2): FCTL bits; FCTL = 0 is the plain chip
 FCTL_TWIN_EN, FCTL_TWIN_USE, FCTL_RESTORE, FCTL_DBGF = 1, 2, 16, 0x4000
 FCTL_PULSE_SHIFT, FCTL_DEMOTE, FCTL_CTEST = 5, 0x2000, 0x8000
+# gshare randomness (GRAND; GSRC 0 the LFSR, 1 the oscillator bit), ring oscillators A and B run, divider takes B
+FCTL_GRAND, FCTL_GSRC, FCTL_ROA, FCTL_ROB, FCTL_ROSEL = 0x100, 0x200, 0x400, 0x800, 0x1000
 CODE_NONE, CODE_PARITY, CODE_SECDED, CODE_DETECT = 0, 1, 2, 3
-# FSTAT (sticky, cleared by CMD_CLEAR_STATS and reset; DEMOTED is live) and fault events on DBG with FCTL_DBGF:
-# 0-3 twin flags, 4 canary (one clock after the ACK), 5 any checker, 6 watchdog, 7 DEMOTED, 10 default with W3
+# FSTAT (sticky, cleared by CMD_CLEAR_STATS and reset; DEMOTED and KEPT are live) and fault events on DBG with
+# FCTL_DBGF: 0-3 twin flags, 4 canary (one clock after the ACK), 5 any checker, 6 watchdog, 7 DEMOTED, 8 the selected
+# ring oscillator / 256, 9 the random bit of the last training before the last predict, 10 default with W3
 TW_ERR, TW_COR, TW_DET, TW_SDC = 1, 2, 4, 8
-CANARY, CHK_QUEUE, CHK_STAGE, CHK_WSEQ, CHK_HANDSHAKE, WDOG, DEMOTED = 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400
+CANARY, CHK_QUEUE, CHK_STAGE, CHK_WSEQ, CHK_HANDSHAKE, WDOG, DEMOTED, KEPT = 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x800
+# with CTRL[15] MASK = 1 the leaky twin stores code word ^ TWMASK (the chip's parameter; model/bpx1.py TWMASK is the
+# same value); after switching MASK clear the predictors (CMD_CLEAR_PRED): older words read as faulty otherwise
+TWMASK = 0xF0
+CTRL_MASK = 0x8000
+# reset strap: these uio pins while reset ends keep the tables (OP = 3, CSn = 0, MOSI = 1, SCK low, REQ unchanged)
+STRAP_UIO = 0x4C
 # write-pulse setting of W0-W2 (FCTL[7:5]): 0 standard (half a clock); 1-7 the tap after 1, 2, 3, 4, 6, 8, 12
 # delay cells, typically about 0.6 ns each (docs/mosaic.md 7.4 has the widths per corner)
 PULSE_CELLS = (0, 1, 2, 3, 4, 6, 8, 12)
@@ -143,13 +152,15 @@ class Bpx1Host:
     def chip_id(self):
         return self.read(REG_ID)[0]          # 0xB101
 
-    def set_drive(self, drive=0, freeze=False, features=7, dbg0=10, dbg1=13):
+    def set_drive(self, drive=0, freeze=False, features=7, dbg0=10, dbg1=13, mask=False):
         """Which predictor answers the host: 0 default, 1 bimodal, 2 gshare, 3 tournament, 4 static not-taken.
         features (CTRL[14:12]) of the default predictor: 1 reference inputs, 2 negation in memory, 4 adaptive
-        threshold (7 = as after reset); 0 = safe mode, the plain perceptron.  CTRL[15] is unused (reads 0).
+        threshold (7 = as after reset); 0 = safe mode, the plain perceptron.
         dbg0, dbg1: events on the DBG pins (10 and 13: the last predictions of the default predictor and the
-        tournament, as after reset)."""
-        self.write(REG_CTRL, (drive & 7) | (8 if freeze else 0) | ((dbg0 & 15) << 4) | ((dbg1 & 15) << 8) | ((features & 7) << 12))
+        tournament, as after reset).  mask: CTRL[15] MASK, the leaky twin's code mask (TWMASK); clear the predictors
+        after changing it."""
+        self.write(REG_CTRL, (drive & 7) | (8 if freeze else 0) | ((dbg0 & 15) << 4) | ((dbg1 & 15) << 8) | ((features & 7) << 12)
+                   | (CTRL_MASK if mask else 0))
 
     def command(self, bits):
         self.write(REG_CMD, bits)
@@ -166,7 +177,7 @@ class Bpx1Host:
 
     def dump(self, space, count):
         """Raw state (FR-10): space 0 bimodal+chooser, 1 gshare, 7 small registers, 8.. weight tables,
-        12 the leaky twin of W3 ({check[3:0], data[3:0]}; reads 0 unless FCTL_TWIN_EN)."""
+        12 the leaky twin of W3 (its nodes: {check[3:0], data[3:0]}, ^ TWMASK with MASK; reads 0 unless FCTL_TWIN_EN)."""
         self.write(REG_RAW_ADDR, 0x8000 | (space << 8))
         for _ in range(8):
             self.idle()
@@ -184,33 +195,38 @@ class Bpx1Host:
 
     # ---------------------------------------------------------------- mosaic (docs/mosaic.md 7.2, 7.3)
     def set_fctl(self, twin=False, use=False, code=CODE_NONE, restore=False, dbgf=False, pulse=0, demote=False,
-                 ctest=False, other=0):
+                 ctest=False, grand=False, gsrc=0, ro_a=False, ro_b=False, ro_sel=0):
         """twin: let the leaky twin's data through (compare, flags, events); use: the default predictor sums the
         twin's weight instead of W3's; code: protection of the twin (0 none, 1 parity -> abstain, 2 SEC-DED,
         3 detect all -> abstain); restore: restore-on-use; dbgf: the DBG selections index the fault events;
         pulse: write-pulse setting of W0-W2 (0 standard, 1-7 shorter: PULSE_CELLS); demote: after four detected
         faults the tournament drives instead of the default predictor; ctest: canary self-test (fires at every
-        predict); other: the remaining FCTL bits [12:8] as a word (their functions come with step 5)."""
-        v = (other & 0x1F00) | (FCTL_TWIN_EN if twin else 0) | (FCTL_TWIN_USE if use else 0) | ((code & 3) << 2)
+        predict); grand: gshare counters leave a limit only on a random 1, from the LFSR (gsrc 0) or the
+        oscillator (gsrc 1); ro_a, ro_b: ring oscillator A / B runs (A is meant to be kept running, B rested);
+        ro_sel: the divider (event 8) and the oscillator bit take ring A (0) or B (1)."""
+        v = (FCTL_TWIN_EN if twin else 0) | (FCTL_TWIN_USE if use else 0) | ((code & 3) << 2)
         v |= (FCTL_RESTORE if restore else 0) | (FCTL_DBGF if dbgf else 0) | ((pulse & 7) << FCTL_PULSE_SHIFT)
         v |= (FCTL_DEMOTE if demote else 0) | (FCTL_CTEST if ctest else 0)
+        v |= (FCTL_GRAND if grand else 0) | (FCTL_GSRC if gsrc else 0) | (FCTL_ROA if ro_a else 0)
+        v |= (FCTL_ROB if ro_b else 0) | (FCTL_ROSEL if ro_sel else 0)
         self.write(REG_FCTL, v)
         return v
 
     def fstat(self, clear=False):
-        """Fault flags: TW_ERR, TW_COR, TW_DET, TW_SDC, CANARY, the four checkers, WDOG (sticky) and DEMOTED (live);
-        clear=True clears them, the fault count and DEMOTED, with the statistics (CMD bit 2)."""
+        """Fault flags: TW_ERR, TW_COR, TW_DET, TW_SDC, CANARY, the four checkers, WDOG (sticky), DEMOTED and KEPT
+        (live); clear=True clears the sticky ones, the fault count and DEMOTED, with the statistics (CMD bit 2)."""
         v = self.read(REG_FSTAT)[0]
         if clear:
             self.command(CMD_CLEAR_STATS)
         return v
 
     @staticmethod
-    def twin_word(weight):
-        """Code word of a 4-bit weight as the twin stores it: c_k = XOR of the three data bits other than d_k."""
+    def twin_word(weight, mask=False):
+        """The node values (raw space 12) of a twin entry holding a 4-bit weight: the code word {check, data}, with
+        c_k = XOR of the three data bits other than d_k, XOR TWMASK if MASK (CTRL[15]) is set."""
         d = weight & 15
         b = [(d >> k) & 1 for k in range(4)]
-        return sum((b[0] ^ b[1] ^ b[2] ^ b[3] ^ b[k]) << (4 + k) for k in range(4)) | d
+        return (sum((b[0] ^ b[1] ^ b[2] ^ b[3] ^ b[k]) << (4 + k) for k in range(4)) | d) ^ (TWMASK if mask else 0)
 
     # ---------------------------------------------------------------- trace replay
     def replay(self, trace):
@@ -237,11 +253,23 @@ class TTPins:
         tt.ui_in.value = 0
         tt.uio_in.value = 0x10
         tt.clock_project_PWM(clock_hz)
-        tt.reset_project(True)
-        time.sleep_ms(2)
-        tt.reset_project(False)
         self.tt = tt
         self.wait_us = max(1, 2_000_000 // clock_hz)
+        self.reset()
+
+    def reset(self, strap=False):
+        """Pin reset.  strap=True: the reset strap (OP = 3, CSn = 0, MOSI = 1, SCK low while reset ends; docs/SPEC.md)
+        keeps the predictor tables (warm reset, or the latches' power-up state after power-up); FSTAT KEPT shows it.
+        The pins are held well beyond the 4 clocks before and after the release that the chip needs; afterwards
+        CSn goes high (and stays high for more than 4 clocks before the first SPI word, as every word here does)."""
+        self.tt.uio_in.value = STRAP_UIO if strap else 0x10
+        self.time.sleep_ms(1)
+        self.tt.reset_project(True)
+        self.time.sleep_ms(2)
+        self.tt.reset_project(False)
+        self.time.sleep_ms(1)
+        self.tt.uio_in.value = 0x10
+        self.time.sleep_ms(1)
 
     def set_ui(self, v):
         self.tt.ui_in.value = v

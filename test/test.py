@@ -205,7 +205,8 @@ async def random_ops_against_model(dut):
             m.frozen = rng.random() < 0.2
             m.feat = rng.choice([m.cfg.FEAT] * 4 + list(range(8)))
             # CTRL[15] (removed binarised inference) is set now and then: the chip must ignore it
-            await h.spi(0x01, [m.ctrl_word() | (0x8000 if rng.random() < 0.3 else 0)])
+            m.mask = rng.random() < 0.3                  # CTRL[15] MASK (the twin is off here: no visible effect)
+            await h.spi(0x01, [m.ctrl_word()])
             continue
         exp = m.request(op, arg)
         pred, conf, cyc = await h.request(op, arg)
@@ -271,7 +272,7 @@ async def raw_access_write(dut):
     assert await rd(7, 4) == 0x2A3, "threshold and adaptation counter"
     assert (await h.spi(0x01, n=1))[0] == m0.ctrl_word() == 0x7DA0, "CTRL after reset"
     await h.spi(0x01, [0xFDA0])
-    assert (await h.spi(0x01, n=1))[0] == 0x7DA0, "CTRL[15] must read 0 and ignore writes"
+    assert (await h.spi(0x01, n=1))[0] == 0xFDA0, "CTRL[15] (MASK) must read back as written"
     # the bimodal predictor uses the written counter: entry 5 is now strongly taken, entry 4 still weakly not-taken
     await h.spi(0x01, [0x0DA1])
     pred, _, _ = await h.request(bpx1.OP_PREDICT, 5)
@@ -358,13 +359,16 @@ async def mosaic_registers(dut):
     await start(dut)
     h = Host(dut, random.Random(SEED + 3000))
     m = bpx1.Bpx1()
-    # at gate level the write-pulse setting (FCTL[7:5]) stays 0: short pulses are a silicon experiment
-    pm = ~0x00E0 if GATES else 0xFFFF
+    # at gate level the write-pulse setting (FCTL[7:5]) stays 0 (short pulses are a silicon experiment) and no ring
+    # oscillator runs (FCTL[11:10]: a zero-delay loop with the PDK's models); in the RTL run against the model the
+    # rings stay off too, so that the oscillator bit is 0 as in the model (they run in ring_oscillators)
+    pm = (~0x0CE0 & 0xFFFF) if GATES else 0xFFFF
     assert await h.spi(0x11, n=2) == [0, 0], "FCTL, FSTAT after reset"
     for v in (0xBEEE, 0x4000, 0xFFFE, 0x0000, 0x5552):
         v &= pm
         await h.spi(0x11, [v])
         assert (await h.spi(0x11, n=1))[0] == v, f"FCTL does not hold {v:#06x}"
+    pm &= ~(bpx1.FCTL_ROA | bpx1.FCTL_ROB)
     await h.spi(0x02, [0x0001])                      # soft reset clears FCTL like CTRL
     await ClockCycles(dut.clk, 30)
     assert await h.spi(0x11, n=2) == [0, 0], "FCTL, FSTAT after soft reset"
@@ -406,40 +410,71 @@ async def twin_directed(dut):
     c = m.cfg
     assert await raw_rd(h, bpx1.SPACE_TWIN, 3) == 0, "twin must read 0 while TWIN_EN = 0"
     await set_fctl(h, m, bpx1.FCTL_TWIN_EN)
-    assert await raw_rd(h, bpx1.SPACE_TWIN, 3) == 0xFF, "twin entry after reset: the code word of -1"
+    assert await raw_rd(h, bpx1.SPACE_TWIN, 3) == 0xFF, "twin entry after reset (MASK = 0): the code word of -1"
     ids = [0x15, 0x2A, 0x3C, 0x47, 0x5E, 0x63, 0x79, 0x8B, 0x91, 0xA4, 0xB2, 0xCD]
     flips = [0x00, 0x01, 0x04, 0x10, 0x80, 0x22, 0x30, 0x03, 0x07, 0x51, None]     # None: W3 changed, twin not
     seen = set()
     dsel_pairs = [(0, 1), (2, 3), (10, 2), (1, 3)]
     n = 0
-    for use in (0, 1):
-        for code in range(4):
-            for fl in flips:
-                ident = ids[n % len(ids)]
-                d0, d1 = dsel_pairs[n % len(dsel_pairs)]
-                n += 1
-                m.dsel = [d0, d1]
-                await h.spi(0x01, [m.ctrl_word()])
-                await set_fctl(h, m, bpx1.FCTL_TWIN_EN | (use << 1) | (code << 2) | bpx1.FCTL_DBGF)
-                await h.spi(0x02, [0x0004])          # clear FSTAT (and the statistics)
-                m.clear_stats()
-                a = m._lookup(ident, m.sh, m.psh).idx[-1]
-                w3 = m.raw(11, a)
-                await raw_wr(h, m, bpx1.SPACE_TWIN, a, bpx1.tw_encode(w3) ^ (fl or 0))
-                if fl is None:
-                    await raw_wr(h, m, 11, a, w3 ^ 0x5)
-                await checked_request(h, m, bpx1.OP_PREDICT, ident, f"code {code} use {use} flips {fl}")
-                assert m.last_tw is not None
-                seen.add((code, m.last_tw["outcome"], use))
-                assert (await h.spi(0x12, n=1))[0] == m.fstat_reg, f"FSTAT, code {code} flips {fl}: model {m.fstat_reg:#x}"
-                await checked_request(h, m, bpx1.OP_SPECIAL, bpx1.SUB_FLUSH, "flush")
-    want = {(cd, o, u) for cd in range(4) for o in {0: (0, 5, 6), 1: (0, 3, 5, 6), 2: (0, 1, 2, 3, 4, 5), 3: (0, 3, 5)}[cd] for u in (0, 1)}
+    for mk in (0, 1):                                    # CTRL[15] MASK: the code mask off and on
+        m.mask = bool(mk)
+        for use in (0, 1):
+            for code in range(4):
+                for fl in flips:
+                    ident = ids[n % len(ids)]
+                    d0, d1 = dsel_pairs[n % len(dsel_pairs)]
+                    n += 1
+                    m.dsel = [d0, d1]
+                    await h.spi(0x01, [m.ctrl_word()])
+                    await set_fctl(h, m, bpx1.FCTL_TWIN_EN | (use << 1) | (code << 2) | bpx1.FCTL_DBGF)
+                    await h.spi(0x02, [0x0004])          # clear FSTAT (and the statistics)
+                    m.clear_stats()
+                    a = m._lookup(ident, m.sh, m.psh).idx[-1]
+                    w3 = m.raw(11, a)
+                    await raw_wr(h, m, bpx1.SPACE_TWIN, a, m.node_word(w3) ^ (fl or 0))
+                    if fl is None:
+                        await raw_wr(h, m, 11, a, w3 ^ 0x5)
+                    await checked_request(h, m, bpx1.OP_PREDICT, ident, f"mask {mk} code {code} use {use} flips {fl}")
+                    assert m.last_tw is not None
+                    seen.add((mk, code, m.last_tw["outcome"], use))
+                    assert (await h.spi(0x12, n=1))[0] == m.fstat_reg, f"FSTAT, mask {mk} code {code} flips {fl}: model {m.fstat_reg:#x}"
+                    await checked_request(h, m, bpx1.OP_SPECIAL, bpx1.SUB_FLUSH, "flush")
+    want = {(mk, cd, o, u) for mk in (0, 1) for cd in range(4)
+            for o in {0: (0, 5, 6), 1: (0, 3, 5, 6), 2: (0, 1, 2, 3, 4, 5), 3: (0, 3, 5)}[cd] for u in (0, 1)}
     assert want <= seen, f"decode outcomes not reached: {sorted(want - seen)}"
 
+    # the clear writes the initial word under the present MASK (here 1: 0xFF ^ TWMASK)
+    await h.spi(0x02, [0x0002])
+    await ClockCycles(dut.clk, 30)
+    m.clear_predictors()
+    assert await raw_rd(h, bpx1.SPACE_TWIN, 7) == 0xFF ^ bpx1.TWMASK == m.raw(bpx1.SPACE_TWIN, 7), "clear under MASK = 1"
+
+    # code mask (docs/mosaic.md 7.7): nodes that have all decayed the same way (all 0, all 1).  MASK = 0: both are
+    # code words (of 0 and -1), so no code detects them; MASK = 1: they are no code word once the mask is taken off,
+    # and SEC-DED and detect-all abstain (TW_DET)
+    decay = []
+    for mk in (0, 1):
+        m.mask = bool(mk)
+        await h.spi(0x01, [m.ctrl_word()])
+        for code in (0, 1, 2, 3):
+            for nodes in (0x00, 0xFF):
+                ident = ids[(2 * code + (nodes & 1) + mk) % len(ids)]
+                await set_fctl(h, m, bpx1.FCTL_TWIN_EN | (code << 2) | bpx1.FCTL_DBGF)
+                a = m._lookup(ident, m.sh, m.psh).idx[-1]
+                await raw_wr(h, m, bpx1.SPACE_TWIN, a, nodes)
+                await checked_request(h, m, bpx1.OP_PREDICT, ident, f"decayed nodes {nodes:#04x}, mask {mk}, code {code}")
+                f = m.last_tw["flags"]
+                if mk and code in (2, 3):
+                    assert f & bpx1.TW_DET, f"decayed nodes {nodes:#04x}, MASK = 1, code {code}: not detected ({f:#x})"
+                if not mk:
+                    assert not f & (bpx1.TW_DET | bpx1.TW_COR), f"decayed nodes {nodes:#04x}, MASK = 0: not a valid word ({f:#x})"
+                decay.append((mk, code, nodes, bpx1.TWO_NAMES[m.last_tw["outcome"]]))
+                await checked_request(h, m, bpx1.OP_SPECIAL, bpx1.SUB_FLUSH, "flush")
+    dut._log.info(f"decayed words, TWMASK {bpx1.TWMASK:#04x}: (MASK, code, nodes, outcome) {decay}")
     # restore-on-use: make a branch confidently right (weights at their limits), flip one bit of its twin word,
     # resolve it without a learning step: the entry is rewritten corrected (SEC-DED) or as read (parity)
-    await h.spi(0x01, [0x0DA0 | (m.feat << 12)])
     m.dsel = [10, 13]
+    await h.spi(0x01, [m.ctrl_word()])                 # MASK stays 1 for the restore checks
     rest = []
     for code, fl in ((2, 0x02), (2, 0x40), (1, 0x08), (0, 0x01)):
         await set_fctl(h, m, bpx1.FCTL_TWIN_EN | (code << 2) | bpx1.FCTL_RESTORE)
@@ -448,7 +483,7 @@ async def twin_directed(dut):
         for i in range(len(c.weights)):
             await raw_wr(h, m, 8 + i, L.idx[i], 0x8 if L.neg[i] else 0x7)
         a = L.idx[-1]
-        await raw_wr(h, m, bpx1.SPACE_TWIN, a, bpx1.tw_encode(m.wt[-1][a]) ^ fl)
+        await raw_wr(h, m, bpx1.SPACE_TWIN, a, m.node_word(m.wt[-1][a]) ^ fl)
         tk = 1 if m._lookup(ident, m.sh, m.psh).p_def else 0
         await checked_request(h, m, bpx1.OP_PREDICT_RESOLVE_T if tk else bpx1.OP_PREDICT_RESOLVE_NT, ident, f"restore code {code}")
         rest.append(m.last_train["restore"])
@@ -690,7 +725,7 @@ async def canary_demotion(dut):
     await raw_wr(h, m, 0, L.bi, 3 | (1 << 2))
     for i in range(len(m.cfg.weights)):
         await raw_wr(h, m, 8 + i, L.idx[i], 0x7 if L.neg[i] else 0x8)
-    await raw_wr(h, m, bpx1.SPACE_TWIN, L.idx[-1], bpx1.tw_encode(m.wt[-1][L.idx[-1]]))
+    await raw_wr(h, m, bpx1.SPACE_TWIN, L.idx[-1], m.node_word(m.wt[-1][L.idx[-1]]))
     L = m._lookup(target, m.sh, m.psh)
     assert L.p_def != L.p_trn, f"target branch: default {L.p_def}, tournament {L.p_trn}"
     # demoted: the tournament answers; the target branch shows it
@@ -718,3 +753,217 @@ async def canary_demotion(dut):
     await compare_state(h, m)
     dut._log.info(f"canary: FSTAT {f_can:#06x} after 3 CTEST predicts; demotion after {k} injected double errors "
                   f"(FSTAT {f_dem:#06x}); tournament drives, suspended, resumed, cleared; state equals the model")
+
+
+# ---------------------------------------------------------------------------------------------------- mosaic step 5
+@cocotb.test()
+async def gshare_random(dut):
+    """gshare probabilistic hysteresis (docs/mosaic.md 7.7), also at gate level: a counter at its limit, trained away
+    from it, always moves with GRAND = 0, moves only on a 1 of the LFSR with GSRC = 0 (some held, some moved, exactly
+    as the golden model's LFSR says), and never with GSRC = 1 (the oscillator bit is 0 while no ring runs).  Fault
+    event 9 (the random bit of the last training) and event 8 (the divided oscillator, 0) on DBG against the model."""
+    await start(dut)
+    h = Host(dut, random.Random(SEED + 8000))
+    m = bpx1.Bpx1()
+    m.dsel = [bpx1.EV_RAND, bpx1.EV_DIV]
+    await h.spi(0x01, [m.ctrl_word()])
+    rng = random.Random(SEED + 8001)
+    trials = 16 if GATES else 40
+    res = {}
+    for name, f in (("GRAND off", 0), ("LFSR", bpx1.FCTL_GRAND), ("oscillator", bpx1.FCTL_GRAND | bpx1.FCTL_GSRC)):
+        await set_fctl(h, m, f | bpx1.FCTL_DBGF)
+        held = moved = 0
+        for n in range(trials):
+            ident = rng.randrange(256)
+            top = rng.random() < 0.5
+            gi = m._lookup(ident, m.sh, m.psh).gi          # queue empty: the commit lookup is the predict lookup
+            await raw_wr(h, m, 1, gi, 3 if top else 0)
+            tk = 0 if top else 1                            # away from the limit
+            await checked_request(h, m, bpx1.OP_PREDICT_RESOLVE_T if tk else bpx1.OP_PREDICT_RESOLVE_NT, ident,
+                                  f"{name} trial {n}")
+            got = await raw_rd(h, 1, gi)
+            assert got == m.gsh[gi], f"{name} trial {n}: gshare entry {gi} is {got}, model {m.gsh[gi]}"
+            if got == (3 if top else 0):
+                held += 1
+            else:
+                moved += 1
+        res[name] = (held, moved)
+    assert res["GRAND off"] == (0, trials), f"GRAND = 0 must always move: {res}"
+    assert res["LFSR"][0] > 0 and res["LFSR"][1] > 0, f"the LFSR must hold some and move some: {res}"
+    assert res["oscillator"] == (trials, 0), f"GSRC = 1 without a running ring must always hold: {res}"
+    await set_fctl(h, m, 0)
+    await ClockCycles(dut.clk, 8)
+    await compare_state(h, m)
+    dut._log.info(f"gshare randomness: (held, moved) at a limit {res}; DBG events 8, 9 and state equal the model")
+
+
+async def pin_reset(h, op, csn, mosi, release=True):
+    """A pin reset (rst_n low for 8 clocks) with OP, CSn, MOSI held from 4 clocks before until 6 clocks after it (SCK
+    low, REQ unchanged), then, with release, CSn high and OP 0; waits for READY."""
+    dut = h.dut
+    await FallingEdge(dut.clk)
+    h.ui, h.uio = 0, ((op & 3) << 2) | ((csn & 1) << 4) | ((mosi & 1) << 6)
+    h._drive()
+    await ClockCycles(dut.clk, 4)
+    dut.rst_n.value = 0
+    await ClockCycles(dut.clk, 8)
+    dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 6)
+    if release:
+        h.uio = 0x10
+        h._drive()
+    for _ in range(60):
+        await RisingEdge(dut.clk)
+        if (int(dut.uo_out.value) >> 4) & 1:
+            return
+    assert False, "READY did not rise after the pin reset"
+
+
+@cocotb.test()
+async def strap_reset(dut):
+    """Reset strap (docs/mosaic.md 7.7), also at gate level: train, then a pin reset with OP = 3, CSn = 0, MOSI = 1:
+    the tables (bimodal/chooser, gshare, W0-W3, the twin) are unchanged, the small registers, histories, settings
+    and statistics are reset, FSTAT KEPT is set (CMD bit 2 leaves it); right after it, with CSn still low and no SCK
+    edge, the next SPI word works without raising CSn first.  Each single wrong strap condition, and a soft reset,
+    give a normal clearing reset and clear KEPT."""
+    await start(dut)
+    h = Host(dut, random.Random(SEED + 9000))
+    m = bpx1.Bpx1()
+    rng = random.Random(SEED + 9001)
+    hist = {}
+    ids = [rng.randrange(256) for _ in range(24)]
+
+    async def train(n, what):
+        # TWIN_EN in RTL (the twin's nodes are unknown at gate level); GRAND with the LFSR moves the LFSR along
+        await set_fctl(h, m, (bpx1.FCTL_GRAND if GATES else bpx1.FCTL_TWIN_EN | bpx1.FCTL_GRAND))
+        for k in range(n):
+            ident = rng.choice(ids)
+            await checked_request(h, m, bpx1.OP_PREDICT_RESOLVE_T if outcome(ident, hist) else bpx1.OP_PREDICT_RESOLVE_NT,
+                                  ident, f"{what} {k}")
+        if not GATES:
+            a = rng.randrange(32)
+            await raw_wr(h, m, bpx1.SPACE_TWIN, a, m.tw[a] ^ 0x10)     # a twin word that training does not produce
+        await raw_wr(h, m, 7, 4, 0x0C3)                    # threshold 12, adaptation counter 3: reset must undo it
+        m.drive = 1
+        await h.spi(0x01, [m.ctrl_word()])                 # CTRL: reset must undo it
+        await checked_request(h, m, bpx1.OP_PREDICT, rng.choice(ids), f"{what} in flight")   # one branch in flight
+
+    async def tables_differ_from_reset():
+        c = bpx1.Bpx1()
+        return m.bim != c.bim and m.gsh != c.gsh and m.wt[1] != c.wt[1]
+
+    n_train = 60 if GATES else 200
+    await train(n_train, "train")
+    assert await tables_differ_from_reset(), "training did not change the tables"
+    before = m.state()
+    # the strap; CSn and MOSI stay as they were after reset, and the first SPI word starts without a CSn edge
+    await pin_reset(h, 3, 0, 1, release=False)
+    m.reset(strap=True)
+    h.uio = (h.uio & ~0x0C) & 0xFF                         # OP back to 0; CSn still low, MOSI 1, SCK low
+    h._drive()
+    await ClockCycles(dut.clk, 4)
+    ident = await h.spi(0x00, n=1)
+    assert ident == [0xB101], f"first SPI word after a strapped reset with CSn still low: {ident}"
+    assert (await h.spi(0x12, n=1))[0] == bpx1.KEPT == m.fstat_reg, "FSTAT after the strapped reset: KEPT only"
+    st = m.state()
+    for k in ("bim", "cho", "gsh", "weights", "twin"):
+        assert st[k] == before[k], f"model: table {k} not kept"
+    assert st["theta"] == m.cfg.THETA and st["tc"] == 0 and st["queue"] == [] and st["drive"] == 0
+    if not GATES:
+        await set_fctl(h, m, bpx1.FCTL_TWIN_EN)            # so that the dump reads the twin's nodes
+    await compare_state(h, m)                              # tables as trained, small registers reset, FSTAT = KEPT
+    await set_fctl(h, m, 0)
+    await compare_stats(h, m)
+    await h.spi(0x02, [0x0004])                            # CMD bit 2 leaves KEPT
+    m.clear_stats()
+    assert (await h.spi(0x12, n=1))[0] == bpx1.KEPT, "CMD bit 2 must leave KEPT"
+    log = ["strap: tables kept, KEPT"]
+
+    # each single wrong condition: a normal reset (tables cleared, KEPT cleared)
+    for op, csn, mosi, what in ((2, 0, 1, "OP = 2"), (3, 1, 1, "CSn = 1"), (3, 0, 0, "MOSI = 0")):
+        await train(20 if GATES else 60, what)
+        await pin_reset(h, 3, 0, 1)                        # KEPT first, so that the wrong strap visibly clears it
+        m.reset(strap=True)
+        assert (await h.spi(0x12, n=1))[0] == bpx1.KEPT
+        await pin_reset(h, op, csn, mosi)
+        m.reset(strap=False)
+        f = (await h.spi(0x12, n=1))[0]
+        assert f == 0, f"{what}: FSTAT {f:#06x} after a reset without the strap"
+        if GATES:                                          # a sample of each table (full dumps take long at gate level)
+            for sp, a in ((0, 5), (1, 9), (8, 3), (11, 17)):
+                assert await raw_rd(h, sp, a) == m.raw(sp, a), f"{what}: space {sp} entry {a} not cleared"
+        else:
+            await compare_state(h, m)
+        log.append(f"{what}: cleared")
+
+    # a soft reset is a reset without the strap
+    await train(10, "soft")
+    await pin_reset(h, 3, 0, 1)
+    m.reset(strap=True)
+    await h.spi(0x02, [0x0001])
+    await ClockCycles(dut.clk, 30)
+    m.reset()
+    assert (await h.spi(0x12, n=1))[0] == 0, "soft reset must clear KEPT"
+    if not GATES:
+        await compare_state(h, m)
+    log.append("soft reset: cleared")
+    dut._log.info(f"reset strap: {log}; replies and state equal the model")
+
+
+@cocotb.test(skip=GATES)
+async def ring_oscillators(dut):
+    """The two ring oscillators (docs/mosaic.md 7.7), latch-cell RTL only (test/sky130_cells_sim.v: the xnor2_1 model
+    carries 4 ns, one per ring, so both rings simulate at 125 MHz).  Each ring is run and selected in turn: fault event
+    8 on DBG0 toggles at the ring frequency / 256; with the selected ring stopped it stays 0; with GRAND and GSRC = 1
+    the oscillator bit reaches gshare (event 9 shows both values).  Flip-flop model: no rings (div = rnd = 0)."""
+    await start(dut)
+    h = Host(dut, random.Random(SEED + 10000))
+    m = bpx1.Bpx1()
+    u = dut.user_project
+    chip = u.u_chip if hasattr(u, "u_chip") else u
+    if not hasattr(chip.u_ro, "u_ra"):
+        dut._log.info("ring oscillators: flip-flop model, no rings (div = rnd = 0); nothing to measure")
+        return
+    m.dsel = [bpx1.EV_DIV, bpx1.EV_RAND]
+    await h.spi(0x01, [m.ctrl_word()])
+
+    async def watch(cycles):
+        n0 = n1 = 0
+        last = int(dut.uo_out.value)
+        for _ in range(cycles):
+            await RisingEdge(dut.clk)
+            await Timer(1, unit="ns")
+            v = int(dut.uo_out.value)
+            n0 += ((v ^ last) >> 5) & 1
+            n1 += ((v ^ last) >> 6) & 1
+            last = v
+        return n0, n1, last
+
+    res = []
+    cycles = 1000
+    for name, f in (("A", bpx1.FCTL_ROA), ("B", bpx1.FCTL_ROB | bpx1.FCTL_ROSEL)):
+        await h.spi(0x11, [f | bpx1.FCTL_DBGF])
+        await ClockCycles(dut.clk, 10)
+        n0, _, _ = await watch(cycles)
+        mhz = n0 / 2 * 256 / (cycles * CLK_NS * 1e-3)
+        res.append((name, round(mhz, 1)))
+        assert abs(mhz - 125.0) < 0.15 * 125.0, f"ring {name}: {mhz:.1f} MHz, expected about 125 MHz"
+        # the other ring selected (stopped): static 0
+        await h.spi(0x11, [(f ^ bpx1.FCTL_ROSEL) | bpx1.FCTL_DBGF])
+        await ClockCycles(dut.clk, 6)
+        n0, _, last = await watch(200)
+        assert n0 == 0 and not (last >> 5) & 1, f"ring {name} running, the other selected: event 8 not static at 0"
+    # the oscillator bit into gshare: GRAND, GSRC = 1, ring A; event 9 must show both values over the trainings
+    await h.spi(0x11, [bpx1.FCTL_ROA | bpx1.FCTL_GRAND | bpx1.FCTL_GSRC | bpx1.FCTL_DBGF])
+    seen = set()
+    rng = random.Random(SEED + 10001)
+    for n in range(60):
+        await h.request(bpx1.OP_PREDICT_RESOLVE_T if rng.random() < 0.5 else bpx1.OP_PREDICT_RESOLVE_NT, rng.randrange(256))
+        seen.add(h.pins[3])                               # DBG1 = event 9 with the ACK
+    assert seen == {0, 1}, f"event 9 with the oscillator bit: values {seen}"
+    # all stopped: static
+    await h.spi(0x11, [bpx1.FCTL_DBGF])
+    await ClockCycles(dut.clk, 6)
+    n0, _, last = await watch(200)
+    assert n0 == 0 and not (last >> 5) & 1, "rings stopped: event 8 not static at 0"
+    dut._log.info(f"ring oscillators: simulated frequency from event 8 {res} MHz; oscillator bit reaches gshare (event 9 {sorted(seen)})")
