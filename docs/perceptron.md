@@ -204,5 +204,6 @@ mosaic.md 9 step 2)**:
 
 θ and the (2,3,3)/(2,4,4) choice lie within 0.0001× of speedup: noise. (2,4,4) was taken back in step 3 because ×4 is
 a shift, while ×3 put an adder on the critical path. **All 69 programs, simulator: 1.13439× / 90.93 % against
-1.13596× / 91.42 % before (−0.49 points).** The ablation of section 3 predicted −0.38 points for the 4-bit weights
+1.13596× / 91.42 % before (−0.49 points).** That figure is for (2,3,3); the chip's (2,4,4) gives 90.93 % too
+(90.9322 %, CPU model: fault_campaign.md 2) **(VERIFIED, fault_campaign.md)**. The ablation of section 3 predicted −0.38 points for the 4-bit weights
 alone. Measured on the mosaic's RTL (docs/cosim.md): TBD(final).
