@@ -37,7 +37,7 @@ oscillator bit; two ring oscillators; a reset strap that keeps the tables. Every
 the chip is the plain, verified design. Faults are reported as flags and as events on the debug pins.
 
 Measured in simulation inside a five-stage RV32IM CPU model, over 69 benchmark programs: the default predictor is
-right on about 90.9 % of branches (simulator; the RTL figure is in `docs/cosim.md`: TBD(final)), against
+right on 90.93 % of branches (RTL co-simulation, `docs/cosim.md`; the simulator gives the same), against
 tournament 88.9 %, gshare 87.3 % and bimodal 86.5 %, and makes the CPU about 1.13 times faster than static
 not-taken. Parts of the perceptron can be switched off at runtime, down to a plain hashed perceptron
 (`docs/perceptron.md`).

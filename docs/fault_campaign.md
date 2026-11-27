@@ -4,8 +4,8 @@ Status: done, 26 Nov 2026, branch `campaign`; coset-mask follow-up in section 7 
 since mosaic step 5 (switchable mask CTRL[15], `8'hF0`). The baseline that the silicon measurements are compared against:
 predicted extra mispredictions per fault, per predictor and per protection mode. Every number below was run and
 read in this campaign **(VERIFIED)** unless marked otherwise; it ran on the owner's PC (61 and 51 minutes of wall
-time). Raw results: `~/work/bpx1_fi/out/*.tsv` (WSL); aggregated tables and logs: `explore/fault_results/` on branch
-`campaign`. Runner: `explore/fault_campaign.py`; validation:
+time). Raw results: `~/work/bpx1_fi/out/*.tsv` (WSL); aggregated tables and logs: `explore/fault_results/` (from
+branch `campaign`, merged into `mosaic`). Runner: `explore/fault_campaign.py`; validation:
 `explore/fault_validate.py`; injection, twin and decay model: `explore/bpsim.cc` (kind `gehlr`, options listed
 above `struct GehlRP`).
 

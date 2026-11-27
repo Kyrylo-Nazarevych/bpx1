@@ -271,6 +271,7 @@ class TTPins:
         tt.uio_oe_pico.value = 0xFC          # uio[1:0] are outputs of the chip: the board must not drive them
         tt.ui_in.value = 0
         tt.uio_in.value = 0x10
+        self.uio_v = 0x10
         tt.clock_project_PWM(clock_hz)
         self.tt = tt
         self.wait_us = max(1, 2_000_000 // clock_hz)
@@ -281,19 +282,25 @@ class TTPins:
         keeps the predictor tables (warm reset, or the latches' power-up state after power-up); FSTAT KEPT shows it.
         The pins are held well beyond the 4 clocks before and after the release that the chip needs; afterwards
         CSn goes high (and stays high for more than 4 clocks before the first SPI word, as every word here does)."""
-        self.tt.uio_in.value = STRAP_UIO if strap else 0x10
+        # REQ (uio[7]) keeps its level through the reset: the host object's copy of the uio pins (Bpx1Host.uio) holds
+        # the REQ level it last drove, and its next request toggles that copy; forcing REQ to 0 here would leave the
+        # copy at 1, and that request would then drive no edge and wait for ever.  The chip takes the REQ level present
+        # at reset as "no request pending" (ACK follows it), so any level is fine.
+        req = self.uio_v & 0x80
+        self.set_uio((STRAP_UIO if strap else 0x10) | req)
         self.time.sleep_ms(1)
         self.tt.reset_project(True)
         self.time.sleep_ms(2)
         self.tt.reset_project(False)
         self.time.sleep_ms(1)
-        self.tt.uio_in.value = 0x10
+        self.set_uio(0x10 | req)
         self.time.sleep_ms(1)
 
     def set_ui(self, v):
         self.tt.ui_in.value = v
 
     def set_uio(self, v):
+        self.uio_v = v                        # what the board drives now (reset() keeps its REQ level)
         self.tt.uio_in.value = v
 
     def get_uo(self):

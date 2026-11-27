@@ -539,9 +539,12 @@ module bpx_core #(
   localparam F_WD = `FV_WD;         // bound of the watchdog count (see the assertion); 12 is reached (cover), 13 not
   reg f_past = 1'b0;
   reg f_rs   = 1'b0;                // a reset has been applied: the registers are defined
+  reg f_sc   = 1'b0;                // the last reset was a strapped pin reset and its own clear has not run yet
   always @(posedge clk) begin
     f_past <= 1'b1;
     if (irst) f_rs <= 1'b1;
+    if (irst) f_sc <= rst & strap;  // tracked here from the pins, independently of kept and init_pend
+    else if (clr_exec) f_sc <= 1'b0;
   end
   always @(posedge clk) if (!f_past) assume (rst);
 
@@ -607,12 +610,14 @@ module bpx_core #(
     if (f_quiet >= F_N && !f_activity) assert (f_idle);
 
     // ---- reset values of the mosaic registers (docs/mosaic.md 7.2, 7.7); KEPT is the strap at the last edge of a
-    //      pin reset, 0 after a soft reset, and changes only by a reset; a clear that leaves the tables is the
-    //      clear at the end of a strapped reset and nothing else
+    //      pin reset, 0 after a soft reset, and changes only by a reset; the tables are cleared (clr_tab) by every
+    //      clear except the first clear after a strapped pin reset, and by that one too if CMD bit 1 asked for a
+    //      clear as well (f_sc follows the pins, not kept)
     if ($past(irst)) assert (fctl == 16'd0 && !mask_en && fstat == 10'd0 && !dem && dcnt == 2'd0 && !lpw && !lrb &&
                              kept == ($past(rst) && $past(strap)) && init_pend);
     else assert (kept == $past(kept));
-    if (clr_exec && !clr_tab) assert (kept && init_pend && !clrp_pend);
+    if (!irst) assert (f_sc == (kept && init_pend));
+    if (clr_exec && !irst) assert (clr_tab == !(f_sc && !clrp_pend));
     if (!$past(irst)) begin
       // ---- RR-04: the reply changes only together with ACK
       if (ack == $past(ack)) assert (pred == $past(pred) && conf == $past(conf));
@@ -664,8 +669,14 @@ module bpx_core #(
     cover (r_empty);
     cover (f_rep && p_exec);
     cover (f_rep && f_idle && n_res == 3);
-    // the strap: a reset that keeps the tables ends ready; a later clear by CMD bit 1 clears them
+    // the strap: the strapped reset's own clear executes and leaves the tables (clr_tab = 0); a reset that keeps the
+    // tables ends ready, and a later clear by CMD bit 1 clears them.  That the table contents are kept is checked in
+    // simulation (cocotb strap_reset, the strap step of the random co-simulation), not here: the proofs use the
+    // flip-flop table model and do not follow the contents.
+    cover (clr_exec && !clr_tab && !irst);
     cover (kept && ready && clr_exec && clr_tab);
+    // the liveness bound of the watchdog count is tight: 12 is reached (the assertion above: never more)
+    cover (wd_cnt == F_WD);
   end
 `ifdef FV_NOSPI
   // Task "nowait": with a silent control port, which requests can be made to wait?  These assertions justify the

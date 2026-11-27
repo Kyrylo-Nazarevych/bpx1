@@ -2,7 +2,7 @@
 
 Evidence labels as in the requirements specification, section 10. Updated for the mosaic round (27 Nov 2026).
 **(VERIFIED, progress log)** means recorded as run in docs/mosaic.md section 9 by the session that built that step;
-figures of the final full regression are `TBD(final)`. Sections 2–5 describe the harnesses and proofs, which the
+the final full regression is the entry "step 5 completed" there, run on the committed source `69d0bf4`. Sections 2–5 describe the harnesses and proofs, which the
 mosaic extends (section 7). The commands are at the end.
 
 ## 1. Summary
@@ -11,14 +11,14 @@ mosaic extends (section 7). The commands are at the end.
 
 | Requirement | Evidence | Result |
 | --- | --- | --- |
-| VR-01 golden model, bit-exact, every quirk | random regression with fault injection, plain and concurrent (section 7); co-simulation of 71 programs in three modes | steps 2–4: 0 mismatches **(VERIFIED, progress log)**; final: TBD(final) |
-| Plain chip (FCTL = 0) equals the verified design | `RG_PLAIN=1` random runs; co-simulation with FCTL never written | steps 3–4: 0 mismatches **(VERIFIED, progress log)**; final: TBD(final) |
-| VR-02 coverage | docs/coverage.md, coverage_bins.md | step 4: cross 52/52, other 178/178 reachable **(VERIFIED, progress log)**; final: TBD(final) |
-| VR-03 formal, with the mosaic's assertions | section 7.4 | step 4: prove, nowait, cover pass **(VERIFIED, progress log)**; `bmcfull` at full size: TBD(final) |
-| VR-04 gate level | local build + gate-level test (twin, rings, short pulse off) | step 4: 4 passed + 4 skipped (RTL only) **(VERIFIED, progress log)**; final: TBD(final) |
-| VR-05 CI | CI of the `mosaic` head | TBD(final) |
-| VR-06 speedup and accuracy (plain chip) | cosim.md, cosim_dual.md, cosim_safe.md | TBD(final); simulator after the trims: 1.13439× / 90.93 % (all 69 programs) **(VERIFIED, progress log, step 2)** |
-| Mutation checks (the test of the tests) | section 7.3 | every listed mutation caught, steps 3–4 **(VERIFIED, progress log)** |
+| VR-01 golden model, bit-exact, every quirk | random regression with fault injection, plain and concurrent (section 7); co-simulation of 71 programs in three modes | steps 2–4: 0 mismatches; final: **0 mismatches** in 421,243,679 program requests (140,267,792 / 140,281,743 / 140,694,144 in the three modes) and in 92 × 100,000 random operations plain (9,200,750 requests) and concurrent (9,200,759), plus 8 × 1,000,000 for counter saturation (8,000,637) **(VERIFIED, progress log, step 5)** |
+| Plain chip (FCTL = 0) equals the verified design | `RG_PLAIN=1` random runs; co-simulation with FCTL never written | steps 3–4: 0 mismatches; final 92 × 100,000 plain (9,200,796 requests) and concurrent (9,200,776): 0 mismatches **(VERIFIED, progress log, step 5)** |
+| VR-02 coverage | docs/coverage.md, coverage_bins.md | step 4: cross 52/52, other 178/178 reachable; final: **295 of 295** reachable bins (cross 52/52, other 243/243; 16 cross and 14 other bins cannot occur) **(VERIFIED, progress log, step 5, and docs/coverage_bins.md)** |
+| VR-03 formal, with the mosaic's assertions | section 7.4 | final: prove, nowait, cover, bmc and `bmcfull` (full size, 30 clocks) all pass **(VERIFIED, progress log, step 5)** |
+| VR-04 gate level | local build + gate-level test (twin, rings, short pulse off) | step 4: 4 passed + 4 skipped; final build (density 80): 6 passed + 5 skipped (RTL only) **(VERIFIED, progress log, step 5)** |
+| VR-05 CI | CI of the `mosaic` head | see section 6 |
+| VR-06 speedup and accuracy (plain chip) | cosim.md, cosim_dual.md, cosim_safe.md | default 1.1307× over static not-taken (tuning 1.1280, held-out 1.1384), 90.93 % accurate; 1.1345× with two requests per cycle; safe mode 1.1249× / 89.06 % **(VERIFIED, progress log, step 5, and the three reports)** |
+| Mutation checks (the test of the tests) | section 7.3 | every listed mutation caught, steps 3–5 (20 of 20 in step 5) **(VERIFIED, progress log)** |
 
 ### 1.2 The perceptron design before this round (tag `g3-perceptron`)
 
@@ -38,14 +38,21 @@ mosaic extends (section 7). The commands are at the end.
 
 Against the tagged-table design (tag `g3-tage`, same benchmark set and CPU contract, 10-bit identifiers): 1.1317× /
 1.1353× / 91.24 % there, 1.1324× / 1.1361× / 91.42 % for `g3-perceptron` **(VERIFIED on RTL in that round)**. These
-figures are for 5-bit weights; the mosaic's trimmed perceptron replaces them when the final co-simulation is in.
+figures are for 5-bit weights. The mosaic's trimmed perceptron: 1.1307× / 1.1345× / 90.93 %; tournament 88.92 %,
+gshare 87.29 %, bimodal 86.47 % (unchanged); the default is below the best reference on 2 of 69 programs (`sys.json`
+−0.78 points, `interp.expr` −0.09), on 31 in safe mode **(VERIFIED, progress log, step 5, and docs/cosim*.md)**.
 
 **Statistics offload (owners' decision, 27 Nov).** The chip now counts only resolved branches and the
 mispredictions of the driving predictor (STATS 0x09–0x0E read 0). The test harness counts each predictor's
 mispredictions from the prediction pins (PRED, PBIM, PGSH, DBG0, DBG1 with the reset selections) and the outcomes it
-sent, and compares them with the golden model; the two chip counters are compared as before. Which harnesses
-carry this in the final run, and its result: TBD(final). Where the sections below
-say "the five statistics counters", read: the two counters plus the pin counts.
+sent, and compares them with the golden model; the two chip counters are compared as before. In the final run all
+three harnesses carry it **(VERIFIED, progress log, step 5)**: `cosim/cosim.cpp` keeps its own copy of the queue and
+counts from the pins as the FPGA would (random runs: 9,631 statistics windows checked, 0 mismatches; concurrent runs:
+pin totals equal to the model in 92 of 92 runs, `cosim/conc_check.py` line H; program co-simulation: 568
+per-predictor totals per mode equal to the model, and in all 426 runs per mode the chip's two counters equal the
+harness's counts); `test/test.py` counts from the pins in its random and trace tests; `host/bpx1.py` `replay()`
+counts from the pins (PBIM/PGSH through `uio_out`; not run on hardware). Where the sections below describe the
+perceptron round's "five statistics counters", read: the two counters plus the pin counts.
 
 ## 2. The golden model and what "bit-exact" covers (VR-01)
 
@@ -55,7 +62,7 @@ same `PRED` and `CONF` for every request whatever the timing, because both follo
 
 | Harness | Stimulus | Compared | Volume |
 | --- | --- | --- | --- |
-| `cosim/run.sh` (Verilator, pins of `bpx_chip`) | the U1 CPU contract on each benchmark program: up to 4 branches in flight, wrong-path predicts, mispredictions, FLUSH after register-indirect jumps; and each program again one branch at a time | every reply; the five statistics counters at the end | 71 programs: both adapter modes, and the safe mode of the default predictor |
+| `cosim/run.sh` (Verilator, pins of `bpx_chip`) | the U1 CPU contract on each benchmark program: up to 4 branches in flight, wrong-path predicts, mispredictions, FLUSH after register-indirect jumps; and each program again one branch at a time | every reply; the statistics at the end (since the offload: the two chip counters and the four per-predictor counts taken from the pins) | 71 programs: both adapter modes, and the safe mode of the default predictor |
 | `cosim/random.sh` (Verilator, pins) | `model/randgen.py`: random operations including misuse (resolve with nothing in flight, predict when full), random gaps (0 to 9 clocks) and set-up (0 to 2 clocks), changes of the driving predictor and freeze, clear predictors, clear statistics, soft reset | every reply; the four prediction pins at every accepted predict; statistics after 996 snapshots (with and without clear, including saturated counters and the overflow flag); **every state bit** through the raw-access port 1,540 times, with and without branches in flight; the 16 feature settings of the default predictor and raw writes of its threshold, changed in mid-stream | 10 seeds × 100,000 |
 | `test/test.py` (cocotb + Icarus; CI runs it on RTL and on the gate-level netlist) | random operations with request edges at random picosecond offsets inside the clock period; a trace replay; a directed test of raw-access writes (whole entries, single fields, neighbours, the small registers, CTRL after reset, and that a written counter is the one predicted from) | every reply, the four prediction pins, statistics, every state bit | 3,000 + 3,000 per run (700 at gate level) |
 
@@ -65,8 +72,9 @@ and the real latch cells with their write pulses, and the gate-level test runs t
 Limits of this evidence: the model and the RTL were written by the same author from the same specification, so a
 misreading of the specification would be in both. The cross-check against the separately written simulator
 (`explore/bpsim`, cosim.md 6): with one branch in flight the default predictor's misprediction counts are equal
-on all 69 programs, and its mean accuracy in the CPU runs is 91.42 % in both; the references agree on 63 to 69 of
-69 programs in the CPU runs **(VERIFIED)**. (The perceptron has no pseudo-random element, unlike the tagged-table
+on all 69 programs, and its mean accuracy in the CPU runs is the same in both (91.42 % in the perceptron round,
+90.93 % for the mosaic); the references agree on 63 to 69 of 69 programs in the CPU runs, the in-flight default on
+45 of 69 (the misprediction-alone rule) **(VERIFIED: cosim.md 6; progress log, step 5)**. (The perceptron has no pseudo-random element, unlike the tagged-table
 design, so nothing is left to differ.)
 
 ## 2a. The control port during a live run (FR-10, U4)
@@ -105,7 +113,8 @@ cycle; FLUSH after a register-indirect jump. Penalties: misprediction 2 cycles, 
 JAL 0 or 1, JALR 2, load-use 1, divide 32. Static not-taken on the same CPU without a chip is the baseline.
 
 Each program runs with each of the four predictors driving and with the chip forced to static not-taken, and every
-run reports all four predictors' mispredictions (the chip counts them side by side). Results: `docs/cosim.md`
+run reports all four predictors' mispredictions (since the statistics offload the harness counts them from the
+prediction pins, as the FPGA will; the chip counts only resolved branches and its own wrong answers). Results: `docs/cosim.md`
 (one request per CPU cycle), `docs/cosim_dual.md` (two requests in a cycle where needed, SPEC 9 rule 7) and
 `docs/cosim_safe.md` (the default predictor in its safe mode, CTRL[15:12] = 0).
 
@@ -194,8 +203,9 @@ inputs of these proofs.
 docs/coverage.md defines the bins; docs/coverage_bins.md lists the hits. `g3-perceptron`: 52 of 52 reachable bins
 of operation × in-flight depth × misprediction × back-pressure, 125 of 125 other bins, in 1,000,109 requests
 **(VERIFIED in that round)**. The mosaic adds bins for every quirk: step 3 other 158/158, step 4 other 178/178 with
-12 checker and watchdog bins that cannot occur without a fault; cross 52/52 throughout **(VERIFIED, progress log)**;
-step 5 and final: TBD(final). The 16 excluded cross bins are those that cannot occur for a legal host with a silent
+12 checker and watchdog bins that cannot occur without a fault; cross 52/52 throughout **(VERIFIED, progress log)**.
+Final (step 5, 92 × 100,000, 9,200,750 requests): cross 52/52, other 243/243 reachable (257 defined, 14 cannot occur
+in simulation), **295 of 295 = 100 %** **(VERIFIED, progress log, step 5, and docs/coverage_bins.md)**. The 16 excluded cross bins are those that cannot occur for a legal host with a silent
 control port; that claim is the formal task `nowait`, not an argument.
 
 ## 6. Gate level and CI (VR-04, VR-05)
@@ -208,8 +218,15 @@ Mosaic: every step was built locally and the gate-level test run on its netlist 
 docs/timing.md). Gate level keeps the twin off (FCTL[0] = 0: the PDK's model shows a floating node as X; eight named
 `and2_1` mask cells stop it), PULSE = 0 and both rings stopped (a running ring is a zero-delay loop in the PDK's
 models); `mosaic_registers`, `gshare_random` and `strap_reset` also run at gate level, the RTL-only tests are
-skipped. Step 4 final build: 4 passed + 4 skipped **(VERIFIED, progress log)**. Final build: TBD(final). CI of the
-mosaic: TBD(final).
+skipped. Step 4 final build: 4 passed + 4 skipped **(VERIFIED, progress log)**. Final build (density 80, 33 ns):
+6 passed + 5 skipped (RTL only) **(VERIFIED, progress log, step 5)**.
+
+CI of the mosaic: `2837285` (step 3) and `ca279c9` (step 4): gds, test, docs success; the verified source
+`69d0bf4`: test and docs success, gds still running when last read **(VERIFIED, public GitHub API)**. Open (the lead
+reads them): the gds result of `69d0bf4` and the CI of the step-6 commit (documents, `explore/` and the review
+fix-ups, with a byte-identical synthesised netlist). The probes: `probe-leaky` (`b428b21`) and `probe-ro`
+(`67eaabd`): gds, precheck, gl_test, viewer, test and docs success **(VERIFIED: GitHub Actions runs 45862940558 and
+45889703170 and their siblings, read through the public API)**.
 
 ## 7. Verification of the mosaic, per step
 
@@ -230,12 +247,16 @@ once; the checker flags are asserted to stay 0 in the proofs.
 | `pulse_settings` (latch cells) | W0–W2 pulses of 0.57 × k ns for settings 1–7 (k = 1, 2, 3, 4, 6, 8, 12), the standard half clock on BC, G, W3 and the twin at every setting; tables equal the model | 4 |
 | `checkers_watchdog` | each checker and the watchdog set exactly its FSTAT bit and event (forced signals), cleared by CMD bit 2 | 4 |
 | `canary_demotion` | canary by CTEST, fourth fault, DEMOTED, suspension by DEMOTE = 0 | 4 |
+| `canary_halves` | each canary half alone: one shadow flop forced to the opposite of its flop at an answered predict (CTEST off) gives CANARY and event 4; none forced, nothing | 6 (review) |
+| `mask_staging` | a MASK switch with a staged branch in flight: restore-on-use and training write what the model writes (the MASK staging rule, in a plain run) | 6 (review) |
 | `gshare_random` | GRAND with the LFSR against the model | 5 |
-| `strap_reset` | the strap combination keeps the tables, KEPT, the SPI block after such a reset | 5 |
+| `strap_reset` | the strap combination keeps the tables, KEPT, the SPI block after such a reset; since step 6 also a soft reset issued while the strap pins are true clears the tables and leaves KEPT = 0 | 5, 6 |
 | `ring_oscillators` | both rings measured from event 8 (125 MHz in the cell model, a model setting) | 5 |
 
-Results: step 2 3/3, step 3 5/5, step 4 8/8 in each of the three ways **(VERIFIED, progress log)**; step 5 and
-final: TBD(final).
+Results: step 2 3/3, step 3 5/5, step 4 8/8, final (step 5) 11/11 in each of the three ways **(VERIFIED, progress
+log)**; after the review fix-ups (step 6) 13/13 in each of the three ways, and random 4 × 50,000 plain and concurrent with
+0 mismatches **(VERIFIED, mosaic.md 9 step 6)**. Gate level was not rerun locally after step 6 (the two new tests
+are RTL only; `strap_reset` gained a step that also runs at gate level, in CI's gl_test).
 
 ### 7.2 Random regression with fault injection
 
@@ -251,13 +272,15 @@ ACK, the statistics, the full state (space 12 included) and the background jobs 
 | Step 3: 4 × 50,000 and 10 × 100,000, plain and concurrent | 0 mismatches; every reachable CODE × outcome × TWIN_USE combination hit; restore-on-use rewrote 61,333 clean, 102 corrected, 931 erroneous words; each FSTAT flag set 67–118 times **(VERIFIED, progress log)** |
 | Step 4: 4 × 50,000 and 10 × 100,000, plain and concurrent | 0 mismatches; CANARY set 75, DEMOTED set 262, predicts while demoted 76,139 **(VERIFIED, progress log)** |
 | `RG_PLAIN=1` (FCTL kept 0), 4 × 50,000 plain and concurrent | steps 3 and 4: 0 mismatches **(VERIFIED, progress log)** |
-| Final: 92 × 100,000 plain and concurrent (rented machine, 109 s) | TBD(final) |
-| Final: `RG_PLAIN=1` | TBD(final) |
+| Final: 92 × 100,000 plain and concurrent (rented machine, 109 s) | plain 9,200,750 requests, concurrent 9,200,759: 0 reply, statistics, state mismatches; 9,631 statistics windows with the pin counts checked; pin totals equal to the model in 92 of 92 concurrent runs; coverage 295/295 **(VERIFIED, progress log, step 5)** |
+| Final: `RG_PLAIN=1`, 92 × 100,000 | plain 9,200,796, concurrent 9,200,776 requests: 0 mismatches; 0 FCTL writes and 0 CTRL writes with bit 15 in the stream **(VERIFIED, progress log, step 5)** |
+| Final: counter saturation, 8 × 1,000,000 (new) | 8,000,637 requests, 0 mismatches; saturated counts and the overflow flag checked **(VERIFIED, progress log, step 5)** |
 
 ### 7.3 Mutation checks
 
-Each mutation was put into the RTL and the regression run (2 × 20,000 random, or the named cocotb test); all were
-caught **(VERIFIED, progress log, steps 3 and 4)**:
+Each mutation was put into the RTL (or, in step 5, the harness) and the regression run (2 × 20,000 random, in step 5
+4 × 20,000 plain + 4 × 20,000 concurrent, or the named cocotb test); all were caught **(VERIFIED, progress log, steps
+3, 4 and 5)**:
 
 - Step 3: FCTL staging rule removed (caught only after the staging probe was added to the generator); raw instead of
   corrected word restored; wrong correction position; event 10 from the twin side; raw read without the mask; TW_SDC
@@ -266,7 +289,16 @@ caught **(VERIFIED, progress log, steps 3 and 4)**:
   keeps DEMOTED; no suspension by DEMOTE = 0; event 4 from the wrong signal; queue checker firing on a full queue;
   CONF from the undemoted predictor; tap wiring swapped (`pulse_settings`); handshake checker dead
   (`checkers_watchdog`); W3 on the short pulse (`pulse_settings`).
-- Step 5: TBD(final).
+- Step 5 (20 of 20 caught; an unmutated control copy clean): GRAND hold bit inverted; GRAND hold ignoring the bit;
+  LFSR wrong tap; LFSR stepping on every write capture; strap without OP, without CSn, without MOSI; mask missing on
+  the training write, on the clear value, on the restore value, on the read; `mis_d` counting every resolve;
+  `mis_d` counting another prediction; `mis_d` without saturation (caught only by the 8 × 1,000,000 runs);
+  harness: bimodal counted from the gshare pin, no repair in its queue copy, DBG taken as always standard, a
+  full-queue predict accepted, tournament counted from DBG0 (shown and complete counts).
+- Review fix-ups (step 6; each mutant run in a scratch copy, flip-flop model): the CONF canary half blind
+  (`can_hit = cap_q & (pred ^ can_s[0])`), which every earlier test missed, fails `canary_halves`; KEPT taken at a
+  soft reset (`kept <= strap`) fails `strap_reset`; the MASK staging rule removed, earlier caught only in concurrent
+  random runs, fails `mask_staging` in round 12 **(VERIFIED, mosaic.md 9 step 6)**.
 
 ### 7.4 Formal
 
@@ -276,18 +308,29 @@ The proofs of section 4 stay green with these assertions added **(VERIFIED, prog
 | --- | --- |
 | `!((p_exec \| do_stage \| drd_exec & d_tab) & wbusy)`, and PRED/CONF hold or refuse while `wbusy` | no flop takes table read data during a table write: the condition behind `src/bpx.sdc` |
 | `chk == 0`, FSTAT 5–9 stay 0 | the checkers and the watchdog cannot fire without a physical fault |
-| watchdog count ≤ 12 | liveness bound: a request pending without a control-port write is answered by its 13th clock (k-induction, free inputs); a cover reaches 12 and not 13; the watchdog trips at 64 |
+| watchdog count ≤ 12 | liveness bound: a request pending without a control-port write is answered by its 13th clock (k-induction, free inputs); a cover reaches 12 (added in step 6: reached in step 22), 13 is excluded by the assertion; the watchdog trips at 64 |
+| `clr_tab == !(f_sc && !clrp_pend)` for every clear outside reset, `f_sc == (kept && init_pend)` (step 6) | the tables are cleared by every clear except the first clear after a strapped pin reset (unless CMD bit 1 asked too); `f_sc` is set from the pins at a strapped pin reset and cleared by the first clear. A cover reaches that clear with `clr_tab = 0`. That the contents are kept is checked in simulation (`strap_reset`, the random runs' strap step): the proofs use the flip-flop table model |
 
 In the formal top the ring outputs and the random bit are free inputs (step 5), so the proofs hold whatever they
-do. Results of step 5 and of the final run (prove, nowait, cover, and `bmcfull` at full size on the rented machine,
-547 s): TBD(final).
+do. Final run on the committed source (`v_fv.sh`): prove, nowait, cover, bmc and `bmcfull` all pass **(VERIFIED,
+progress log, step 5)**. `bmcfull` (the chip's table sizes, 30 clocks from reset) now completes: 547 s on the rented
+machine **(VERIFIED by the owners' report)**, where it timed out locally (section 4). After the review fix-ups
+(step 6, properties and covers only): `prove` (4 minutes), `cover` (15 of 15 reached) and `nowait` pass locally
+**(VERIFIED, mosaic.md 9 step 6)**; `bmc` and `bmcfull` were not rerun (the design under proof is unchanged; the new
+assertions are covered by `prove`, whose base case is a bounded check from reset).
 
 ### 7.5 Co-simulation
 
 Steps 2 and 3 ran subsets (6 and 3 programs, FCTL never written): 0 model mismatches, statistics equal the model,
 mispredictions equal `explore/bpsim` (one-in-flight on all; in-flight default on 4 of 6, the known difference of
 the misprediction-alone rule) **(VERIFIED, progress log)**. Final: 71 programs in three modes (428 s on the rented
-machine): TBD(final).
+machine): 421,243,679 requests replayed (140,267,792 / 140,281,743 / 140,694,144), 0 reply mismatches, 0 programs
+with statistics differing from the model, 0 protocol errors, 0 late answers; default one-in-flight mispredictions
+equal `explore/bpsim` on 69 of 69 programs, in-flight on 45 of 69; bimodal 69, gshare 63, tournament 68 of 69
+**(VERIFIED, progress log, step 5)**. Results: speedup 1.1307× (tuning 1.1280, held-out 1.1384) / 1.1345× (two
+requests per cycle; 1.1324 / 1.1402) / 1.1249× (safe; 1.1213 / 1.1351); accuracy default 90.93 % (tuning 90.19,
+held-out 93.03), bimodal 86.47 %, gshare 87.29 %, tournament 88.92 %, safe default 89.06 % (docs/cosim.md,
+cosim_dual.md, cosim_safe.md).
 
 ## 8. What cannot be simulated
 
@@ -298,14 +341,14 @@ model; with FCTL = 0 none of it is in the path.
 | --- | --- | --- |
 | Retention of the floating nodes (W3L) | the cell model holds for ever; faults injected by raw writes of space 12; the PDK's gate model shows X, so gate level runs with the twin off | experiments.md 4, 5 (experiments 2, 3) |
 | Short write pulses (W0–W2) | behavioural and formal models: no effect; latch-cell model with 0.57 ns per delay cell checks that every setting still writes | experiments.md 7 (experiment 5) |
-| Timing faults and the canary's lead | behavioural: no delay; CTEST fires the canary logically | experiments.md 8 (experiment 6) |
+| Timing faults and the canary's lead | behavioural: no delay; CTEST fires the canary logically; each half alone by forcing its shadow flop (`canary_halves`). On silicon CTEST exercises the pair, not each half: a blind half shows only as "the canary never fires before the first wrong reply" | experiments.md 8 (experiment 6) |
 | Ring oscillators and the oscillator random bit | behavioural and formal: no rings, outputs 0; the latch-cell model gives `xnor2_1` 4 ns (125 MHz, a model setting, not a prediction) | experiments.md 11, 12 (experiments 9, 10) |
 | Power-up state of the latches | the strap's logic is simulated; the power-up values are not | experiments.md 13 (experiment 11) |
 | Physical upsets of the control logic | checkers fired by forced signals in cocotb | experiments.md 10 (experiment 8) |
 
 ## 9. Pre-silicon fault campaign
 
-`docs/fault_campaign.md` (branch `campaign`): random bit flips in every table at five rates and a decay model of the
+`docs/fault_campaign.md` (branch `campaign`, merged into `mosaic` with `explore/`): random bit flips in every table at five rates and a decay model of the
 leaky twin under every CODE × RESTORE, then eight code masks, in `explore/bpsim` on all 71 programs. The injection
 was validated against the golden model: 66 of 66 comparisons equal, and with every event one branch late 58 of 66
 differ **(VERIFIED, fault_campaign.md 2)**. Its results are the baseline for the silicon measurements; its mask
@@ -316,7 +359,6 @@ minutes (masks) of wall time. Not done: an RTL spot check by raw-write injection
 
 | Item | Why it is open |
 | --- | --- |
-| Every `TBD(final)` above | the final full regression and build are being run |
 | A request withdrawn before its acknowledge is covered by formal only | The golden model has no notion of it; the chip counts it as misuse. |
 | microcotb port of the tests, and the host code on real hardware | docs/bringup.md. |
 

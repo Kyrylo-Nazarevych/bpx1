@@ -2,7 +2,8 @@
 
 > **Re-checked on 27 Nov 2026** against `docs/SPEC.md` and the "as built" notes of steps 3, 4 and 5 in
 > `docs/mosaic.md` 7.2–7.7 (commit `f78ae8f`), and against the owners' later decisions (statistics offload, 33 ns).
-> Registers and bits are named; positions in brackets. Figures of the final build are `TBD(final)`.
+> Registers and bits are named; positions in brackets. Figures of the final build (`69d0bf4`, density 80) are from
+> docs/mosaic.md 9, step 5, and docs/timing.md.
 
 Status: written 26 Nov 2026, revised 27 Nov, before any silicon. Nothing here has been run on a chip or a board. Evidence labels:
 **(VERIFIED)** = read in the named file of this repository; **(ESTIMATED)** = reasoning or expectation, basis given;
@@ -36,7 +37,8 @@ oscillator frequency, guard band) is ESTIMATED or DON'T KNOW.
 - **Host names.** Function names are those of `host/bpx1.py` (`set_fctl`, `fstat`, `dump`, `raw_write`,
   `twin_word`, `set_drive`, `stats`, `command`, `reset`). `set_fctl` has a keyword for every FCTL bit;
   `set_drive(mask=…)` sets CTRL[15] MASK; `reset(strap=True)` holds the strap pins **(VERIFIED: host/bpx1.py)**.
-  `stats()` still reads five counters: it changes with the offload (TBD(final)).
+  `stats()` reads the chip's two counters; `replay()` counts the four predictors' mispredictions from the pins
+  (PBIM/PGSH through `uio_out`) **(VERIFIED: host/bpx1.py; not run on hardware)**.
 
 **Safe state, used by every experiment to recover.** (1) `set_fctl()` (FCTL = 0) and `set_drive(…, mask=False)`
 (CTRL[15] = 0); (2) `stats()` to save the counts, then `command(CMD_CLEAR_STATS)` (clears statistics, FSTAT, the
@@ -89,7 +91,8 @@ static not-taken), number and first time of any reply difference, FSTAT, chip te
 
 **How to read the result.** Expected: zero differences; mispredictions equal `docs/cosim.md` exactly for the same
 mode, because the model and RTL agree there **(VERIFIED: cosim.md, mosaic.md 9 step 3 "FCTL = 0" runs)**;
-`docs/cosim.md` for the mosaic's RTL: TBD(final). A difference at 30.3 MHz but not at 1 MHz is a timing fault (go
+`docs/cosim.md` is regenerated for the mosaic's final RTL: default 1.1307× / 90.93 %, 0 reply mismatches in
+140,267,792 requests **(VERIFIED, progress log, step 5, and docs/cosim.md)**. A difference at 30.3 MHz but not at 1 MHz is a timing fault (go
 to experiment 6). A difference at every clock: dump and localise as in bringup.md 4. Any FSTAT bit set with FCTL = 0
 (canary, checker, WDOG) is a finding in itself (section 10). With 4-bit weights the W1/W3 initial value −1 reads 15
 **(VERIFIED: SPEC 7, weights −8…7)**.
@@ -209,7 +212,8 @@ mode (b) has the same race, so it cancels. A raw write may delay a coinciding re
 bimodal/chooser table, gshare, W3 and W3L always get the standard pulse; this is structural** (`u_wp` feeds only those,
 `u_wpx` only W0–W2; checked in the step-4 netlist) **(VERIFIED, progress log, step 4)**. Pulse widths at `u_wpx` in
 the step-4 netlist, settings 1–7 (ns): tt 0.73, 1.33, 1.98, 2.59, 3.74, 4.93, 7.17; ss 1.49 … 14.10; ff 0.47 … 4.93
-(full table in timing.md); final build TBD(final). The latch needs at least 0.14 ns tt, 0.29 ns ss (liberty). The
+(full table in timing.md); final build not measured **(DON'T KNOW: OpenSTA on `u_wpx/X` of the final netlist would
+settle it; same 12 protected delay cells, so close to these, ESTIMATED)**. The latch needs at least 0.14 ns tt, 0.29 ns ss (liberty). The
 setting is copied into the write sequencer only while it is idle, so an FCTL write never changes a pulse under way.
 
 **Procedure.**
@@ -237,15 +241,19 @@ statistics. Hazard: wrong weights persist; set PULSE = 0 and `command(CMD_CLEAR_
 **Purpose.** Measure how much margin the chip has, and whether the canary warns before the first wrong reply.
 
 **Set-up.** The FPGA drives `clk` and can shorten the period, or single cycles. There is a canary on `PRED` and one
-on `CONF`: a shadow flop takes the output flop's D through two `dlygate4sd3_1` (step 5; about 1.1 ns typical, 2.2 ns
-at the slow corner **(ESTIMATED: liberty delays; measured lead TBD(final))**). The comparison is made in the clock
+on `CONF`: a shadow flop takes the output flop's D through two `dlygate4sd3_1` (step 5). Lead in the final build,
+CONF / PRED: tt 1.26 / 1.23 ns, ss 2.61 / 2.41 ns, ff 0.83 / 0.85 ns **(VERIFIED, progress log, step 5: static
+timing of the final netlist)**. The comparison is made in the clock
 after PRED and CONF were loaded, so fault event 4 is a pulse **one clock after the ACK**
 **(VERIFIED: mosaic.md 7.5 as built)**. FSTAT.CANARY [4]. Runs with FCTL = 0 and with TWIN_EN [0] = 1 (the twin
 path is a true path only then).
 
 **Procedure.**
 1. CTEST [15] = 1: the shadow sample is inverted, so the canary must fire at the first acknowledged predict. Check
-   FSTAT.CANARY and event 4, then CTEST = 0 and `command(CMD_CLEAR_STATS)`.
+   FSTAT.CANARY and event 4, then CTEST = 0 and `command(CMD_CLEAR_STATS)`. **Limit:** CTEST inverts both shadow
+   samples (PRED and CONF) at once, so it shows that the pair works, not each half. Each half alone is tested only
+   in simulation (cocotb `canary_halves`, by forcing one shadow flop) **(VERIFIED, mosaic.md 9 step 6)**. On silicon
+   a blind half shows only as "the canary never fires before the first wrong reply" in step 3 below.
 2. Run a program with the twin comparing. Shorten the period step by step (for example 250 ps steps) from 33 ns.
 3. At each step: count canary events and reply differences, read `fstat()`, dump at the end.
 4. Variant: keep a long period and shorten single cycles (one per request, then the predict cycle only).
@@ -257,14 +265,15 @@ path is a true path only then).
 predictor), guard band = difference of the two; FSTAT at each step; ring frequency (experiment 10) as process and
 temperature reference.
 
-**How to read the result.** Slowest path at sign-off at 33 ns: TBD(final) (step 4 at 30 ns: CONF +2.46 ns, PRED
-+3.54 ns at the slow corner; typical +13.87 ns) **(VERIFIED, progress log, step 4)**. Input pads run to 66 MHz
+**How to read the result.** Slowest path at sign-off at 33 ns, slow corner: the CONF canary +3.53 ns; real CONF flop
++6.14 ns, real PRED flop +7.40 ns, PRED canary +5.00 ns, next real endpoints +6.90 ns; typical corner +14.89 ns
+**(VERIFIED, progress log, step 5)** (step 4 at 30 ns: CONF +2.46 ns, PRED +3.54 ns; typical +13.87 ns). Input pads run to 66 MHz
 **(VERIFIED by a research agent: bringup.md 6)**, so typical or fast silicon may not fail below the pad limit: then
 use single short cycles or a lower supply **(ESTIMATED)**. The canaries watch PRED and CONF only; the next real
-endpoints (DBG flops, speculative history) had +3.99 to +4.47 ns in step 3, so a path that fails without a canary
-is possible but less likely than before **(ESTIMATED: slacks in mosaic.md 9)**. A negative guard band (a wrong
-reply before the canary) is still the main negative result to watch for; the lead is about 1 ns typical
-**(ESTIMATED; TBD(final))**, and step 4 showed that placement moves the CONF path by more than 1 ns between builds.
+endpoints are at +6.90 ns at the slow corner in the final build, 0.76 ns above the real CONF flop, so a path that
+fails without a canary is possible but less likely than before **(ESTIMATED: slacks in mosaic.md 9, step 5)**. A
+negative guard band (a wrong reply before the canary) is still the main negative result to watch for; the lead is
+1.23–1.26 ns typical **(VERIFIED, progress log, step 5)**, and step 4 showed that placement moves the CONF path by more than 1 ns between builds.
 When the clock is shortened with a 50 % duty cycle, the write pulse shortens too: write faults may then appear in
 every table (compare with experiment 5). Checker flags may fire here legitimately (timing faults, not upsets): note
 them. Hazard: wrong state persists; go back to 33 ns, safe state, `command(CMD_CLEAR_PRED)`; the twin needs a reset

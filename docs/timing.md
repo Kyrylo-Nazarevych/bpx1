@@ -1,20 +1,29 @@
 # BPX-1 timing (DR-03, PF-04, XR-04, XR-05)
 
 Sign-off STA of local LibreLane builds (since the end of the mosaic round also of the rented machine with the same
-image). Mosaic steps are **(VERIFIED, progress log)** = recorded in docs/mosaic.md section 9; figures of the final
-build are `TBD(final)`.
+image). Mosaic steps are **(VERIFIED, progress log)** = recorded in docs/mosaic.md section 9 by the session that
+built them. The final build's reports per corner are in `docs/mosaic_step5_build/` (OpenSTA in the LibreLane
+container, final netlist and SPEF, the flow SDC plus the `einvp_1` exception).
 
-## Result (final mosaic build)
+## Result (final mosaic build, density 80)
+
+All values **(VERIFIED: progress log, step 5, and docs/mosaic_step5_build/)**.
 
 | Corner | Setup worst slack at 33 ns (30.3 MHz) | Hold |
 | --- | --- | --- |
-| Slow: ss, 100 °C, 1.60 V | TBD(final) | |
-| Typical: tt, 25 °C, 1.80 V | TBD(final) | |
-| All corners | TBD(final) | TBD(final) |
+| Slow: ss, 100 °C, 1.60 V | +3.53 ns (CONF canary); real CONF flop +6.14, real PRED flop +7.40, PRED canary +5.00; next real endpoints +6.90 | |
+| Typical: tt, 25 °C, 1.80 V | +14.89 ns | |
+| All corners | +3.53 ns, 0 violations | +0.058 ns (ff), 0 violations |
 
 **Clock: 33 ns (30.3 MHz)**, owners' decision of 27 Nov 2026 (was 30 ns): margin for the perceptron sum and the
-leaky twin's decoder in the predict cycle, and about 1 ns of lead for the canaries (below). Worst path and its
-length: TBD(final).
+leaky twin's decoder in the predict cycle, and room for a canary lead of about 1 ns typical (below). Worst path at
+the slow corner: flop `_5994_` → twin read-address fan-out → twin read tree → mask `g_twm` → decoder → sum → CONF D →
+`u_cb` → 2 × `dlygate4sd3_1` → CONF canary; data arrival 30.13 ns against 33.66 ns required. Slow-corner warnings:
+2,682 max-slew, 9 max-cap, 0 max-fanout.
+
+**Ring loops.** Static timing reports "There are 4 combinational loops in the design" (two per ring), each cut at
+`u_ro.u_r[ab].g_st[0].u1` A → X; no constrained path runs through a ring (`docs/mosaic_step5_build/sta_loops.txt`)
+**(VERIFIED, progress log, step 5)**.
 
 ## Timing history of the mosaic round
 
@@ -27,10 +36,10 @@ length: TBD(final).
 | Step 4, build 1 (canary 2 × `dlygate4sd3_1`, XOR before the shadow flop) | 30 ns | −0.39 ns | CONF canary (CONF itself +2.18) |
 | Step 4, build 2 (one `dlygate4sd3_1`) | 30 ns | −0.34 ns | CONF canary (CONF itself +1.16) |
 | Step 4, build 3 (one `dlygate4sd1_1`, XOR after the shadow flop) | 30 ns | +2.06 ns | CONF canary; real CONF +2.46, PRED +3.54, its canary +3.06; typical corner +13.87, hold +0.066 |
-| Final (two `dlygate4sd3_1` per canary, offload) | 33 ns | TBD(final) | TBD(final) |
+| Final (two `dlygate4sd3_1` per canary, offload, density 80) | 33 ns | +3.53 ns | CONF canary; real CONF +6.14, PRED +7.40, its canary +5.00; typical corner +14.89, hold +0.058 |
 
-All rows **(VERIFIED, progress log)** except the last. The rented machine reproduced step-4 build 3 exactly
-(+2.057 ns) **(VERIFIED by the owners' report)**.
+All rows **(VERIFIED, progress log)**. The rented machine reproduced step-4 build 3 exactly (+2.057 ns) **(VERIFIED
+by the owners' report)**.
 
 **Placement sensitivity (step 4).** The real CONF flop's slow-corner slack was +2.18, +1.16 and +2.46 ns in three
 builds that differed only in the canary cells: placement moves the critical path by more than a nanosecond. A
@@ -46,9 +55,11 @@ up. The lead is the chain's delay.
 | Build | Chain | Lead, typical | Lead, slow corner |
 | --- | --- | --- | --- |
 | Step 4, build 3 (30 ns) | one `dlygate4sd1_1` | 0.20 ns (CONF), 0.22 ns (PRED) | 0.40 ns, 0.48 ns **(VERIFIED, progress log)** |
-| Final (33 ns) | two `dlygate4sd3_1` | about 1.1 ns **(ESTIMATED: 2 × 0.56–0.58 ns, liberty)**; measured TBD(final) | about 2.2 ns **(ESTIMATED: 2 × 1.07–1.16 ns)**; measured TBD(final) |
+| Final (33 ns) | two `dlygate4sd3_1` | 1.26 ns (CONF), 1.23 ns (PRED) | 2.61 ns, 2.41 ns |
 
-The canary must keep at least 0.3 ns of slack itself. The comparison is made in the clock after PRED and CONF were
+Final build: lead = slack of the flop minus slack of its canary; fast corner (ff) 0.83 ns (CONF), 0.85 ns (PRED)
+**(VERIFIED: progress log, step 5, and docs/mosaic_step5_build/sta_*.txt)**. The liberty estimate was about 1.1 ns
+typical and 2.2 ns slow (2 × 0.56–0.58 ns, 2 × 1.07–1.16 ns); the measured lead is a little longer. The canary must keep at least 0.3 ns of slack itself: +3.53 ns (CONF) and +5.00 ns (PRED) at the slow corner. The comparison is made in the clock after PRED and CONF were
 loaded, so fault event 4 comes one clock after the ACK.
 
 ## Write-pulse widths (W0–W2, FCTL[7:5])
@@ -62,8 +73,9 @@ At `u_wpx/X`, from the step-4 final netlist and parasitics (OpenSTA, latest edge
 | ff | 0.47 | 0.90 | 1.33 | 1.76 | 2.55 | 3.37 | 4.93 | 14.7 at 30 ns |
 
 The short settings depend on the delay line, not the clock; the standard pulse is half a clock, so at 33 ns about
-16 ns **(ESTIMATED: half the period minus the gate skew seen at 30 ns)**; measured widths of the final build:
-TBD(final). The row and gate cells after `u_wpx` reshape these further (not timed: latch gates are not endpoints).
+16 ns **(ESTIMATED: half the period minus the gate skew seen at 30 ns)**. Widths of the final build: not measured
+**(DON'T KNOW: OpenSTA on `u_wpx/X` of the final netlist and SPEF, as in step 4, would settle it; the delay line is
+the same 12 protected cells, so the short settings should be close to the table above, ESTIMATED)**. The row and gate cells after `u_wpx` reshape these further (not timed: latch gates are not endpoints).
 Liberty delay of `dlygate4sd3_1` A → X (rise / fall): tt 0.561 / 0.582 ns, ss 1.071 / 1.158 ns, ff 0.390 / 0.394 ns;
 the latch's own minimum gate pulse is 0.14 ns tt, 0.29 ns ss.
 

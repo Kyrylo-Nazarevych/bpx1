@@ -24,13 +24,14 @@ Each step isolates one thing, so the first failing step says where the problem i
 
 The golden model predicts every pin-level answer: for any sequence of requests, `model/bpx1.py` gives the same
 `PRED`, `CONF`, prediction pins, statistics and table contents as the RTL (420 million requests in simulation
-without a difference for the perceptron design; for the mosaic: docs/verification.md). A difference on silicon with
+without a difference for the perceptron design; 421 million for the mosaic's final RTL: docs/verification.md). A difference on silicon with
 FCTL = 0 is therefore a hardware fault, and the raw dump shows where.
 
 ## 3. Things worth measuring
 
 - **Maximum clock.** Raise the clock until `demo()` differs from the model. Signed off at 30.3 MHz (33 ns) for the
-  slow corner; typical-corner figure TBD(final) (docs/timing.md). The canaries (FSTAT[4]) should warn first:
+  slow corner with +3.53 ns of setup slack; typical corner +14.89 ns **(VERIFIED, progress log, step 5;
+  docs/timing.md)**. The canaries (FSTAT[4]) should warn first:
   docs/experiments.md, experiment 6. The handshake does not care about the ratio between host speed and chip clock.
 - **Single-stepping.** Stop the clock anywhere and step it by hand: the design is fully static, and the tables
   (latches) hold without a clock.
@@ -38,7 +39,9 @@ FCTL = 0 is therefore a hardware fault, and the raw dump shows where.
   the counters without losing an event (16-bit counters: read them at least every 65,535 branches). The chip counts
   resolved branches and the mispredictions of the answers it gave on `PRED`; registers 0x09–0x0E read 0 (statistics
   offload). Each predictor's mispredictions are counted by the host from the four prediction pins (section 5).
-  `host/bpx1.py` `stats()` still reads five counters and changes with the offload: TBD(final).
+  `host/bpx1.py` `stats()` reads the two counters; `replay()` counts each predictor's mispredictions from the pins
+  (DBG0, DBG1 through `uo_out`; PBIM, PGSH through `uio_out`, given a `get_uio` function) **(VERIFIED:
+  host/bpx1.py; not run on hardware)**.
 - **Debug pins.** `CTRL[7:4]` and `CTRL[11:8]` select which internal event appears on `uo_out[5]` and `[6]`
   (docs/SPEC.md 6.4): for a logic analyser when a step above fails.
 

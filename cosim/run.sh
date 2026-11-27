@@ -13,10 +13,15 @@ cd "$(dirname "$0")/.."
 BIN=out/cosim/obj/cosim
 export O=${OUT:-out/cosim}; mkdir -p $O out/cosim
 K=${1:-8}; shift || true
-if [ ! -x $BIN ] || [ cosim/cosim.cpp -nt $BIN ] || [ src/bpx_core.v -nt $BIN ] || [ src/bpx_pred.v -nt $BIN ]; then
+# rebuild when the binary is missing or older than any RTL source or the harness (a stale binary would test old RTL)
+stale=0
+[ -x $BIN ] || stale=1
+for f in src/*.v cosim/cosim.cpp; do if [ "$f" -nt $BIN ]; then stale=1; fi; done
+if [ $stale = 1 ]; then
   verilator --cc --exe --build -O3 -Wno-fatal -Wno-WIDTHEXPAND -Wno-UNUSEDSIGNAL -DBPX_BEHAV --top-module bpx_chip \
     -CFLAGS "-O2" --Mdir out/cosim/obj -o cosim src/bpx_ltab.v src/bpx_pred.v src/bpx_core.v src/bpx_spi.v src/bpx_ro.v src/bpx_chip.v cosim/cosim.cpp > out/cosim/build.log 2>&1 \
     || { tail -20 out/cosim/build.log; exit 1; }
+  touch $BIN
 fi
 PROGS="$@"; [ -z "$PROGS" ] && PROGS=$(ls out/bench | grep -v -E '^summary|^\.' )
 one() {

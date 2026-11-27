@@ -3,7 +3,7 @@
 Everything a fresh session needs to continue: state, decisions, next steps, commands. Last rewritten at the end of
 the mosaic round (27 Nov 2026). Evidence labels as in the requirements specification, section 10. Read
 `docs/SPEC.md` next, then `docs/mosaic.md` (the round's plan, design and progress log), `docs/verification.md` and
-`docs/experiments.md`. Figures still to come from the last runs are written `TBD(final)`.
+`docs/experiments.md`. One gap is left for the lead: the rented machine's spend and destruction (section 8).
 
 ## 1. State in one paragraph
 
@@ -15,10 +15,15 @@ the tournament, gshare randomness, two ring oscillators and a reset strap, all s
 MASK); with FCTL = 0 and CTRL[15] = 0 every predictor is its plain verified version. To make room the perceptron was
 trimmed (4-bit weights, 8-bit path history, binarised inference removed: 90.93 % against 91.42 % in the simulator).
 Steps 1–4 are verified and built clean (step 4: 84.34 %, +2.06 ns at 30 ns) **(VERIFIED, progress log, mosaic.md
-9)**. Step 5's RTL is in (`f78ae8f`), its design with all five statistics counters did not route (86 %), so the
-per-predictor misprediction counts moved to the FPGA (statistics offload, D30), and the clock is 33 ns (D29). The
-final build, the full regression and CI are being run: their figures are `TBD(final)`. `main` stays at the
-perceptron design (tag `g3-perceptron`) until the mosaic is merged.
+9)**. Step 5's first source (`f78ae8f`, five statistics counters) placed at 86 % and did not route, so the
+per-predictor misprediction counts moved to the FPGA (statistics offload, D30); the clock is 33 ns (D29) and the
+placement density 80 (D33). **`mosaic` at `69d0bf4` is the verified final design:** full regression with 0
+mismatches, coverage 295/295, 20 of 20 mutants caught, every formal task passing, and a clean build (80.92 %,
++3.53 ns at the slow corner, DRC/LVS/antenna 0, gate level 6 passed + 5 skipped) **(VERIFIED, progress log,
+mosaic.md 9, step 5)**. The commits after it add documents, the fault-campaign simulator (`explore/`) and the
+review fix-ups (tests, formal properties, scripts, host library; mosaic.md 9, step 6); the synthesised netlist of
+`src/` is byte-identical to that of `69d0bf4` and no flow setting changed **(VERIFIED, step 6)**. **Open, the lead's next step:** merge `mosaic` to `main`, tag it, and read the CI of `main`.
+Until then `main` stays at the perceptron design (tag `g3-perceptron`).
 
 ## 2. Where things are
 
@@ -26,7 +31,8 @@ perceptron design (tag `g3-perceptron`) until the mosaic is merged.
 | --- | --- |
 | Project folder (source of truth, Windows; **the git repository is here**) | `C:\\Users\\Kyrylo\\Desktop\\Claude Folder\\Branch Predictor Hackathon 2` |
 | Linux mirror where every tool runs | `~/work/bpx1` (WSL Ubuntu), filled by `tools/wsl_sync.sh` (which also overwrites the mirror's `.git`); generated data in `~/work/bpx1/out` |
-| Fault-campaign raw results | `~/work/bpx1_fi/out/*.tsv` (WSL); aggregated tables and logs in `explore/fault_results/` on branch `campaign` |
+| Fault-campaign raw results | `~/work/bpx1_fi/out/*.tsv` (WSL); aggregated tables and logs in `explore/fault_results/` (merged from branch `campaign`) |
+| Final build's reports | `docs/mosaic_step5_build/` (metrics, area by block, timing per corner, loop warning); the full run in `~/work/bpx1_vast/h_s5p80/runs/wokwi` (WSL) |
 | GitHub | `Kyrylo-Nazarevych/bpx1`, public; Pages enabled (source: GitHub Actions) |
 | Requirements | `..\\Branch Predictor Hackaton 1\\plan\\FABLE_ALL_IN_BRIEF.md` (v4.1), the owners' decisions in `docs/spec_review.md` section 6, the owners' message of 26 Nov 2026 (perceptron; docs/perceptron.md) and the owners' brief for the mosaic (docs/mosaic.md 1) |
 
@@ -34,13 +40,13 @@ perceptron design (tag `g3-perceptron`) until the mosaic is merged.
 
 | Name | What |
 | --- | --- |
-| `main` | the perceptron design, tag `g3-perceptron`; stays submittable until the mosaic is merged |
-| `mosaic` | the mosaic, steps 2–5 (`08ac75f`, `2837285`, `ca279c9`, `f78ae8f`); merged to `main` after the full regression and CI |
+| `main` | the perceptron design, tag `g3-perceptron`, until the mosaic is merged (open) |
+| `mosaic` | the mosaic, steps 2–5 (`08ac75f`, `2837285`, `ca279c9`, `f78ae8f`, final `69d0bf4`), then the merges of `docs-final` and `campaign` and this document pass; to be merged to `main` and tagged (open) |
 | `probe-leaky` | probe: one 16 × 8 table of floating-node cells (`b428b21`); never for `main` |
 | `probe-ro` | probe: two ring oscillators of named cells, divider, entropy bit (`67eaabd`); never for `main`; its ring A is the mosaic's ring, twice |
-| `campaign` | pre-silicon fault-injection campaign and coset-mask comparison (`fe62aa8`, `4041870`); report copied to `docs/fault_campaign.md` |
+| `campaign` | pre-silicon fault-injection campaign and coset-mask comparison (`fe62aa8`, `4041870`); merged into `mosaic` (simulator, runner, results under `explore/`); `docs/fault_campaign.md` is the corrected copy from `docs-final` |
 | `docs-exp` | guide to the silicon experiments (`856b8d1`); copied to `docs/experiments.md` |
-| `docs-final` | this document pass, based on `f78ae8f` |
+| `docs-final` | the document rewrite for the round, based on `f78ae8f`; merged into `mosaic` |
 | tag `g3-tage` | tagged-table design, verified to G3: the fallback |
 | tag `g3` | the same RTL with the last test harness of that design |
 | tag `g3-perceptron` | the perceptron design, CI green on `793a339` |
@@ -77,7 +83,7 @@ D1–D16 are from the earlier rounds; those changed in this round are marked.
 | D15 | Switches CTRL[14:12]: reference inputs, negation, adaptive threshold. Safe mode = all off, or a reference predictor driving. **Changed:** CTRL[15] binarised inference removed (D19); CTRL[15] is now MASK (D27). | perceptron.md 5; cosim_safe.md |
 | D16 | Rejected with data: probabilistic weight updates, binary weights, a fifth table, unary storage, bit-serial sum, precomputed sums. | perceptron.md 3–4 |
 | D17 | **The mosaic** (owners' brief, 26 Nov): research value first; quirks spread over the predictors, each switchable, off = plain verified predictor; physically risky storage on one part only; the reference predictors' tables always get the standard pulse; accuracy and clock may be sacrificed if the chip still clearly beats static not-taken. Left-out items and reasons in mosaic.md 3. | mosaic.md 1–3 |
-| D18 | **Leaky-cell probe first.** One 16 × 8 table of `einvp_1` floating nodes on its own branch through the flow: clean locally (128 cells kept, DRC/LVS/antenna 0, gate-level pass with the read masked) **(VERIFIED, progress log, probe)**. CI precheck of the probe: TBD(final). | mosaic.md 5, 9 |
+| D18 | **Leaky-cell probe first.** One 16 × 8 table of `einvp_1` floating nodes on its own branch through the flow: clean locally (128 cells kept, DRC/LVS/antenna 0, gate-level pass with the read masked) **(VERIFIED, progress log, probe)**. CI of `b428b21`: gds, precheck, gl_test, viewer success; likewise the ring-oscillator probe `probe-ro` (`67eaabd`) **(VERIFIED: GitHub Actions runs 45862940558, 45889703170)**. | mosaic.md 5, 9 |
 | D19 | **Trims to make room:** weights 5 → 4 bits, sum 9 → 8 bits, path history 16 → 8, binarised inference removed. Cost 91.42 → 90.93 % accuracy, 1.13596 → 1.13439× (all 69 programs, simulator); utilisation 81.2 → 74.2 %. | mosaic.md 9 step 2 **(VERIFIED, progress log)** |
 | D20 | **Reference-input weights 2/4/4, θ start 10.** The 16-candidate sweep put every θ and (2,3,3)/(2,4,4) within 0.0001× (noise); step 2 took (2,3,3), step 3 went back to (2,4,4) because ×4 is a shift and ×3 put an adder on the critical path. | mosaic.md 9 steps 2–3 **(VERIFIED, progress log)** |
 | D21 | **Leaky twin W3L** (32 × 8 floating nodes: 4 data + extended Hamming (8,4) check bits), written with W3 by the standard pulse, compared at every predict; codes none / parity / SEC-DED / detect-all; **training always from the static tables**, so W3 stays golden and the learned state is the same with the twin on or off. | mosaic.md 7.3 |
@@ -88,8 +94,10 @@ D1–D16 are from the earlier rounds; those changed in this round are marked.
 | D26 | **Fault campaign findings** (simulator, 69 programs): per bit the weight tables are the most sensitive part (0.18–0.23 extra mispredictions per flip for the default); faults do not heal; on a leaking twin detect-all is best without restore, SEC-DED with restore-on-use from τ ≈ 1e3 branches; all-0 and all-1 words are code words, so one-directional decay is silent under every code. | fault_campaign.md 3–4 **(VERIFIED, fault_campaign.md)** |
 | D27 | **Switchable code mask:** CTRL[15] MASK stores `code word ^ 8'hF0` (check bits inverted, data untouched): a fully decayed word abstains under SEC-DED and detect-all, CODE 0 unchanged. Switchable because with one-directional decay and SEC-DED + restore no mask gives fewer mispredictions (0.69 against 1.54 per 1000 at τ = 1e4). A change of MASK invalidates the staging register; clear the predictors after switching. | fault_campaign.md 7; mosaic.md 7.7 |
 | D28 | **Strap combination:** OP = 3 **and** CSn = 0 **and** MOSI = 1 at the last clock edge of reset keeps the tables (KEPT). OP = 3 alone is an ordinary request code a host may leave on the pins. | mosaic.md 7.7; SPEC 5 |
-| D29 | **Clock 33 ns (30.3 MHz)**, owners' decision of 27 Nov, latency 3 clocks = 99 ns: the canaries (now 2 × `dlygate4sd3_1`) lead by about 1 ns typical. Slack at 33 ns: TBD(final). | `src/config.json`; timing.md |
-| D30 | **Statistics offload.** With five counters the design reached 86 % and did not route. The chip keeps resolved branches and the mispredictions of the answer given on PRED (the driving predictor); STATS 0x09–0x0E read 0. The FPGA counts each predictor's mispredictions from the pins (PRED, PBIM, PGSH, DBG0 default, DBG1 tournament with the reset selections) and the outcomes it sends. A slow SPI-only host keeps the branch count and the mispredictions of the answers it received. The test harness counts per-predictor mispredictions from the pins against the golden model. Utilisation about 81 % (final: TBD(final)). | owners' decision, 27 Nov; SPEC 4 (being updated) |
+| D29 | **Clock 33 ns (30.3 MHz)**, owners' decision of 27 Nov, latency 3 clocks = 99 ns: the canaries (now 2 × `dlygate4sd3_1`) lead by 1.26 / 1.23 ns typical (CONF / PRED), 2.61 / 2.41 ns slow, 0.83 / 0.85 ns fast. Slack at 33 ns: +3.53 ns slow corner (CONF canary; real CONF +6.14, PRED +7.40), +14.89 ns typical, hold +0.058 ns **(VERIFIED, progress log, step 5)**. | `src/config.json`; timing.md |
+| D30 | **Statistics offload.** With five counters the design reached 86 % and did not route. The chip keeps resolved branches and the mispredictions of the answer given on PRED (the driving predictor); STATS 0x09–0x0E read 0. The FPGA counts each predictor's mispredictions from the pins (PRED, PBIM, PGSH, DBG0 default, DBG1 tournament with the reset selections) and the outcomes it sends. A slow SPI-only host keeps the branch count and the mispredictions of the answers it received. The test harnesses (`cosim/cosim.cpp`, `test/test.py`) count per-predictor mispredictions from the pins against the golden model; `host/bpx1.py` `stats()` reads the two counters and `replay()` counts from the pins (PBIM/PGSH through `uio_out`). Synthesised 54,915 µm² against 58,302 with five counters; final utilisation 80.92 % **(VERIFIED, progress log, step 5)**. | owners' decision, 27 Nov; SPEC 4 |
+| D33 | **Placement density 80** (was 84). With the offload, density 84 stalled at about 57 routing violations after 31 iterations (82: 183 after 18), while density 80 closed clean in 14. | area.md (flow settings); mosaic.md 9 step 5 **(VERIFIED, progress log)** |
+| D34 | **Flow fixes for the protected cells:** the delay line, the canary chains and each ring are fed or left through their own unprotected `buf_2` (`u_dlb`, `u_cb`, `u_bf`, `u_ob`), so no net has only untouchable loads (`RSZ-3006`). Final netlist: 16 named delay cells, two identical rings of 20 cells, 256 `einvp_1`. | mosaic.md 9 step 5 **(VERIFIED, progress log)** |
 | D31 | **Rejected: an ID narrower than 8 bits** with the mapping in the FPGA: about 400–600 µm² **(ESTIMATED from the flop count)** against accuracy and independence from a clever glue layer. | owners' decision, 27 Nov |
 | D32 | **Rented build machine:** chip builds and the big regressions run on a rented 92-CPU machine with the same tool versions (LibreLane 3.0.14 image exported). It reproduced the local step-4 build exactly (84.34 %, +2.057 ns, byte-identical netlist). One build is not faster there; several run at once. Random regression 92 × 100,000 plain and concurrent: 109 s; 71-program co-simulation in three modes: 428 s; full-size bounded proof: 547 s (it timed out locally). | owners' report, 27 Nov **(VERIFIED by the owners' report; not recorded in the repository)** |
 
@@ -103,10 +111,14 @@ the reports and generated documents back. Destroy the machine when idle.
 | What | Status |
 | --- | --- |
 | Steps 2–4: cocotb (latch cells, flip-flop model, repository top), random plain and concurrent, `RG_PLAIN=1` (FCTL = 0), co-simulation subsets, mutation checks, formal prove / nowait / cover, local build and gate level | pass **(VERIFIED, progress log, mosaic.md 9)**; details in verification.md |
-| Step 5 (gshare randomness, oscillators, strap, mask, 33 ns, statistics offload) | TBD(final) |
-| Full regression: 71 programs in three modes, random 92 × 100,000 plain and concurrent, formal including `bmcfull`, cocotb, final build | TBD(final) |
+| Step 5 and the full regression on the committed source `69d0bf4`: cocotb 11/11 in each of three ways; random 92 × 100,000 plain and concurrent (9,200,750 + 9,200,759 requests) and the same with FCTL = 0, plus 8 × 1,000,000 for counter saturation; 71 programs in three modes (421,243,679 requests) | 0 mismatches; coverage 295 of 295 bins; 20 of 20 mutants caught **(VERIFIED, progress log, mosaic.md 9 step 5)** |
+| Formal: prove, nowait, cover, bmc, `bmcfull` (full size) | all pass **(VERIFIED, progress log, step 5)** |
+| Final build (density 80, 33 ns) | 80.92 %, 58,720 µm² cells, DRC/LVS/antenna 0, setup +3.53 ns slow / +14.89 ns typical, hold +0.058 ns, gate level 6 passed + 5 skipped **(VERIFIED, progress log, step 5; docs/mosaic_step5_build/)** |
+| Speedup and accuracy (RTL) | 1.1307× / 90.93 % (two requests per cycle 1.1345×; safe mode 1.1249× / 89.06 %) **(VERIFIED: docs/cosim*.md)** |
 | Pre-silicon fault campaign | done **(VERIFIED, fault_campaign.md: 61 and 51 minutes on the owner's PC)** |
-| CI of the mosaic | TBD(final) |
+| Review fix-ups (step 6): canary halves tested one at a time, soft reset with the strap pins true, MASK staging rule in a plain run, formal covers (watchdog count 12, the strapped clear) and a non-tautological strap assertion, cosim rebuild rule, host reset | the three reviewer mutants now caught; prove, cover, nowait pass; cocotb 13/13 in each of three ways; random 4 × 50,000 plain and concurrent 0 mismatches **(VERIFIED, mosaic.md 9 step 6)** |
+| CI of `mosaic` | `2837285`, `ca279c9`: gds, test, docs success; `69d0bf4`: test and docs success, gds still running when last read **(VERIFIED, public GitHub API)**; gds of `69d0bf4` and the CI of the step-6 commit: open (the lead reads them) |
+| Merge to `main`, tag, CI of `main` | open: the lead's next step |
 
 ## 5. Verified facts worth not rediscovering
 
@@ -133,8 +145,8 @@ the reports and generated documents back. Destroy the machine when idle.
 
 ## 6. Next steps, in order
 
-1. Fill every `TBD(final)` in the documents from the final runs (search for the string).
-2. Final build at 33 ns with the statistics offload; then CI of the `mosaic` head; then merge to `main` and tag.
+1. Record the rented machine's spend and its destruction (section 8).
+2. Merge `mosaic` to `main`, tag it, and check that every CI job of `main` succeeds (open).
 3. Tell the FPGA team: the statistics offload (D30), the strap combination and what to drive during reset
    (bringup.md), 33 ns, and `docs/experiments.md`.
 4. Open the demo-board schematic PDF to settle the header pins for `clk`/`rst_n` (bringup.md 6).
@@ -160,21 +172,22 @@ CONC=1 bash cosim/random.sh 10 100000                    # control port concurre
 RG_PLAIN=1 bash cosim/random.sh 4 50000                  # FCTL kept at 0: the plain chip
 bash formal/run.sh <prove|bmc|cover|nowait|bmcfull>      # formal tasks
 bash tools/harden.sh                                     # local chip build of the repository top + gate-level test
-python3 explore/fault_campaign.py ...                    # fault campaign (branch campaign; fault_campaign.md)
+python3 explore/fault_campaign.py ...                    # fault campaign (fault_campaign.md)
 ```
 
 ## 8. Rented machines (owners' rules)
 
 Vast.ai: up to $12 in total; machines labelled `bpx1-*`; never touch others (`fsk-*`); destroy when idle; report
 the spend at every gate. Spent before this round: about $1.40 **(ESTIMATED from run times)**. This round: the
-92-CPU build machine (D32); its spend: TBD(final). Whether any `bpx1-*` machine still exists: TBD(final) (settled by
-the instance list).
+92-CPU build machine (D32), label `bpx1-fast`, $0.709 per hour **(VERIFIED by the lead's report)**.
+Its spend and its destruction (instance list): TBD(lead).
 
 ## 9. Risks
 
 | Risk | Status |
 | --- | --- |
-| Routing at about 81 % with the offload | Five counters at 86 % did not converge; final figure TBD(final). |
+| Routing with the offload | Closed: clean at density 80, 80.92 %, after 14 iterations (84 stalled at about 57 violations) **(VERIFIED, progress log, step 5)**. Little room is left for RTL changes. |
+| A blind canary half on silicon | CTEST fires both halves at once; each half is tested alone only in simulation (cocotb `canary_halves`). On silicon a blind half shows only as "no canary before the first wrong reply" (experiments.md 8). |
 | A defect neither simulation nor the proofs see | The proofs cover the sequencer, the checker flags (stay 0) and the timing-exception condition under free inputs; the predictor and mosaic logic are covered by simulation against the model. |
 | Physical behaviour that cannot be simulated (retention, short pulses, timing faults, oscillators) | By design: these are the silicon experiments (experiments.md); with FCTL = 0 none of it is in the path. |
 | The FPGA triggers the strap by accident | Needs OP = 3, CSn = 0 and MOSI = 1 together at the end of reset (bringup.md 2). |

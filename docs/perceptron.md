@@ -206,4 +206,6 @@ mosaic.md 9 step 2)**:
 a shift, while ×3 put an adder on the critical path. **All 69 programs, simulator: 1.13439× / 90.93 % against
 1.13596× / 91.42 % before (−0.49 points).** That figure is for (2,3,3); the chip's (2,4,4) gives 90.93 % too
 (90.9322 %, CPU model: fault_campaign.md 2) **(VERIFIED, fault_campaign.md)**. The ablation of section 3 predicted −0.38 points for the 4-bit weights
-alone. Measured on the mosaic's RTL (docs/cosim.md): TBD(final).
+alone. Measured on the mosaic's RTL (docs/cosim.md): 1.1307× / 90.93 % over the 69 programs (tuning 1.1280 / 90.19 %,
+held-out 1.1384 / 93.03 %); 1.1345× with two requests per cycle; safe mode 1.1249× / 89.06 % **(VERIFIED, progress
+log, step 5, and docs/cosim*.md)**.

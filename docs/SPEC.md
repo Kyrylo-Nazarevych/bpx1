@@ -189,7 +189,8 @@ both one clock after they happen; 7 DEMOTED (a level; with the `ACK` of a predic
 predict, one clock later including that predict's own TW_DET); 10 the default prediction of the last predict
 computed with W3 instead of the twin (equal to event 10 of the standard bank unless TWIN_USE changed it); 8 the
 selected ring oscillator divided by 256 (asynchronous: one synchroniser flop, then the DBG flop; 0 while that ring is
-stopped); 9 the random bit (of the source GSRC selects, whatever GRAND says) used at the last training before the
+stopped; it reaches the DBG pin through that one synchroniser flop and the event multiplexers, so a single edge may be
+metastable: use it for frequency counting only); 9 the random bit (of the source GSRC selects, whatever GRAND says) used at the last training before the
 last executed predict (a level that changes only with the `ACK` of a predict; in a combined request the predict comes
 first, so the bit of that request's own training shows at the next predict); 11–15 read 0. A detected fault (TW_DET of a predict,
 CANARY, any checker, WDOG) increments a 2-bit saturating count; the fourth with DEMOTE = 1 sets DEMOTED.

@@ -797,6 +797,104 @@ async def canary_demotion(dut):
                   f"(FSTAT {f_dem:#06x}); tournament drives, suspended, resumed, cleared; state equals the model")
 
 
+@cocotb.test(skip=GATES)
+async def canary_halves(dut):
+    """Each half of the canary on its own (review fix-up): CTEST inverts both shadow samples at once, so it cannot show
+    that the PRED half and the CONF half each work.  With CTEST off, the shadow flop of one half (`u_s` of g_b[0]
+    PRED or g_b[1] CONF; in the flip-flop model the matching bit of `rs`) is forced to the opposite of the value its
+    real flop takes at an acknowledged predict: FSTAT CANARY and fault event 4 must follow, for each half alone; with
+    nothing forced, neither fires.  RTL only (forces internal nets)."""
+    from cocotb.handle import Force, Release
+    await start(dut)
+    h = Host(dut, random.Random(SEED + 7500))
+    m = bpx1.Bpx1()
+    core = core_of(dut)
+    can = core.u_can
+    structural = hasattr(can, "g_b")
+    m.dsel = [bpx1.EV_CANARY, bpx1.EV_DEMOTED]
+    await h.spi(0x01, [m.ctrl_word()])
+    await set_fctl(h, m, bpx1.FCTL_DBGF)
+    cnt = [0]
+
+    async def mon():
+        while True:
+            await RisingEdge(dut.clk)
+            await Timer(1, unit="ns")
+            cnt[0] += (int(dut.uo_out.value) >> 5) & 1          # DBG0 = fault event 4
+
+    mt = cocotb.start_soon(mon())
+    res = {}
+    for n, half in enumerate((None, 0, 1, None)):            # nothing, PRED, CONF, nothing
+        ident = 0x30 + 7 * n
+        exp = m.request(bpx1.OP_PREDICT, ident)
+        bits = [exp.pred, exp.conf]                          # what PRED (bit 0) and CONF (bit 1) take at the answer
+        sig = None
+        if half is not None:
+            await FallingEdge(dut.clk)
+            if structural:
+                sig = can.g_b[half].sq
+                sig.value = Force(1 - bits[half])
+            else:
+                sig = can.rs
+                sig.value = Force((bits[0] | (bits[1] << 1)) ^ (1 << half))
+        cnt[0] = 0
+        pred, conf, _ = await h.request(bpx1.OP_PREDICT, ident)
+        assert (pred, conf) == (exp.pred, exp.conf), f"half {half}: pred/conf {(pred, conf)}, model {(exp.pred, exp.conf)}"
+        await ClockCycles(dut.clk, 3)                        # the comparison is in the clock after the answer
+        if sig is not None:
+            await FallingEdge(dut.clk)
+            sig.value = Release()
+        await ClockCycles(dut.clk, 4)
+        ev = cnt[0]
+        f = (await h.spi(0x12, n=1))[0]
+        name = {None: "none", 0: "PRED", 1: "CONF"}[half]
+        if half is None:
+            assert f == 0 and ev == 0, f"nothing forced: FSTAT {f:#06x}, event 4 seen {ev} clocks"
+        else:
+            assert f == bpx1.CANARY, f"{name} half forced: FSTAT {f:#06x}, expected CANARY only"
+            assert ev == 1, f"{name} half forced: fault event 4 high for {ev} clocks, expected 1"
+        res[f"{n}:{name}"] = (f, ev)
+        await checked_request(h, m, bpx1.OP_SPECIAL, bpx1.SUB_RESOLVE_T if exp.pred else bpx1.SUB_RESOLVE_NT, "resolve")
+        await h.spi(0x02, [0x0004])                          # CMD bit 2: FSTAT and the fault count
+        m.clear_stats()
+    mt.cancel()
+    await ClockCycles(dut.clk, 8)
+    await compare_state(h, m)
+    dut._log.info(f"canary halves ({'latch cells' if structural else 'flip-flop model'}): (FSTAT, event-4 clocks) {res}")
+
+
+@cocotb.test(skip=GATES)
+async def mask_staging(dut):
+    """The MASK staging rule (review fix-up), in a plain run: a change of CTRL[15] MASK must invalidate the staging
+    register, because the staged twin word depends on it.  Each round: a branch in flight (staged under the present
+    MASK), a flipped bit in its twin entry, TWIN_EN with SEC-DED and RESTORE, then MASK switched by a CTRL write and
+    the branch resolved: restore-on-use and training must write what the golden model (no staging) writes."""
+    await start(dut)
+    h = Host(dut, random.Random(SEED + 7600))
+    m = bpx1.Bpx1()
+    rng = random.Random(SEED + 7601)
+    hist = {}
+    await set_fctl(h, m, bpx1.FCTL_TWIN_EN | (bpx1.CODE_SECDED << 2) | bpx1.FCTL_RESTORE)
+    n3 = m.cfg.weights[-1][0]
+    for n in range(24):
+        ident = rng.randrange(256)
+        await checked_request(h, m, bpx1.OP_PREDICT, ident, f"round {n} predict")
+        await ClockCycles(dut.clk, 8)                        # the chip stages the oldest branch
+        a = m._lookup(m.queue[0]["id"], m.ch, m.pch).idx[-1]
+        if rng.random() < 0.5:
+            await raw_wr(h, m, bpx1.SPACE_TWIN, a, m.tw[a] ^ (1 << rng.randrange(8)))
+        m.mask = not m.mask
+        await h.spi(0x01, [m.ctrl_word()])
+        tk = outcome(ident, hist)
+        await checked_request(h, m, bpx1.OP_SPECIAL, bpx1.SUB_RESOLVE_T if tk else bpx1.SUB_RESOLVE_NT, f"round {n} resolve")
+        await ClockCycles(dut.clk, 8)
+        tw = await h.dump(bpx1.SPACE_TWIN, n3)
+        exp = [m.raw(bpx1.SPACE_TWIN, k) for k in range(n3)]
+        assert tw == exp, f"round {n}: twin differs from the model at {[k for k in range(n3) if tw[k] != exp[k]]}"
+    await compare_state(h, m)
+    dut._log.info("MASK staging: 24 rounds of MASK switched with a staged branch in flight; twin and state equal the model")
+
+
 # ---------------------------------------------------------------------------------------------------- mosaic step 5
 @cocotb.test()
 async def gshare_random(dut):
@@ -949,6 +1047,29 @@ async def strap_reset(dut):
     if not GATES:
         await compare_state(h, m)
     log.append("soft reset: cleared")
+
+    # a soft reset issued while the strap pins are true (review fix-up): a host that leaves OP = 3 on the pins sends
+    # CMD 0x0001 with CSn low and MOSI = 1 (the word's last bit), so the strap condition holds during the soft reset;
+    # it is still a reset without the strap: the tables are cleared and KEPT stays 0
+    await train(10, "soft, strap pins")
+    await pin_reset(h, 3, 0, 1)
+    m.reset(strap=True)
+    h.uio = (h.uio & ~0x0C) | (3 << 2)                     # OP = 3 on the pins, REQ unchanged
+    h._drive()
+    await h.spi(0x02, [0x0001])
+    st = int(dut.uio_in.value)
+    assert (st >> 2) & 3 == 3 and (st >> 6) & 1 == 1, f"strap pins not as intended after the CMD word: uio {st:#04x}"
+    await ClockCycles(dut.clk, 30)
+    m.reset()
+    h.uio &= ~0x0C                                         # OP back to 0
+    h._drive()
+    assert (await h.spi(0x12, n=1))[0] == 0, "soft reset with the strap pins true must leave KEPT = 0"
+    if GATES:
+        for sp, a in ((0, 5), (1, 9), (8, 3), (11, 17)):
+            assert await raw_rd(h, sp, a) == m.raw(sp, a), f"soft reset, strap pins: space {sp} entry {a} not cleared"
+    else:
+        await compare_state(h, m)
+    log.append("soft reset with the strap pins true: cleared")
     dut._log.info(f"reset strap: {log}; replies and state equal the model")
 
 

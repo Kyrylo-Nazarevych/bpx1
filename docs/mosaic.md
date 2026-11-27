@@ -254,8 +254,8 @@ and reset.
   slow corner moved between builds (+2.18, +1.16, +2.46 ns), and the canary must keep +0.3 ns. The CTEST XOR
   (`xor2_1`) sits on the shadow flop's output, off the timed path (first built in front of the shadow flop with
   two, then one `dlygate4sd3_1`: the CONF canary missed setup by 0.39 and 0.34 ns; section 9). Measured lead of
-  the canary over its flop, final build: 0.20 ns (CONF) and 0.22 ns (PRED) typical, 0.40 and 0.48 ns at the slow
-  corner. The comparison is made in
+  the canary over its flop, step-4 build: 0.20 ns (CONF) and 0.22 ns (PRED) typical, 0.40 and 0.48 ns at the slow
+  corner; final build (step 5, two `dlygate4sd3_1`): 1.26 / 1.23 ns typical, 2.61 / 2.41 ns slow (section 9). The comparison is made in
   the clock after PRED/CONF were loaded (an executed or a refused predict), so fault event 4 is a pulse one clock
   after the ACK (it cannot come with the ACK); the random co-simulation checks DBG one clock after every ACK.
 - 7.5 checkers (FSTAT 5–8): queue (`qcnt > 4` or `FULL ≠ (qcnt = 4)`); staging (staging valid or a resolve
@@ -369,11 +369,12 @@ and reset.
 3. [done] Registers (7.2), leaky twin (7.3): RTL, model, random generator, tests; local build.
 4. [done] Pulse selector (7.4); canary, checkers, watchdog (7.5); demotion (7.6); formal.
 5. [done, 27 Nov] gshare randomness, oscillators, strap (7.7), code mask, statistics offload; build (section 9).
-6. [regression done, 27 Nov (section 9); documents other than SPEC and this file, CI, merge and tag still open]
-   Full regression (co-simulation of the 71 programs, random plain and concurrent, formal, cocotb, local build),
+6. [regression, build and documents done, 27 Nov (section 9); merge to `main`, tag and CI of `main` open: the
+   lead's next step] Full regression (co-simulation of the 71 programs, random plain and concurrent, formal, cocotb, local build),
    documents (SPEC, verification, area, timing, bring-up experiments), CI, merge to `main`, tag.
 
-7. Pre-silicon fault-injection campaign (owners' request of 26 Nov, once the design is stable; on Vast, economical):
+7. [done, 26–27 Nov; branch `campaign`, merged into `mosaic` in step 6; docs/fault_campaign.md] Pre-silicon
+   fault-injection campaign (owners' request of 26 Nov, once the design is stable; on Vast, economical):
    random bit flips in each predictor's tables at several rates on all 71 programs, and a decay model of the leaky
    table under each protection mode. Result: predicted extra mispredictions per fault, per predictor and per mode,
    as the baseline for the silicon measurements. Planned in the trace simulator (`explore/bpsim`, which equals the
@@ -384,7 +385,9 @@ campaign): labels `bpx1-*`, destroy when idle, $12 total cap.
 
 ## 9. Progress log
 
-- 26 Nov: probe built locally, clean (section 5); pushed as `b428b21`. CI result: pending.
+- 26 Nov: probe built locally, clean (section 5); pushed as `b428b21`. CI result (read 27 Nov, step 6): gds,
+  precheck, gl_test, viewer, test and docs success (run 45862940558 and its siblings); the ring-oscillator probe
+  `probe-ro` (`67eaabd`) likewise (run 45889703170) **(VERIFIED, step 6, public GitHub API)**.
 - 26 Nov, step 2 (trims) **(VERIFIED, this session)**. Sweep (`explore/bpsim` W=8, built with `-Wshadow`; its one
   warning, the local `pr` in `GehlRP::train`, is old and harmless: the member is used as `this->pr`), speedup / CPU
   accuracy, tuning (51) and held-out (18) programs:
@@ -620,3 +623,67 @@ campaign): labels `bpx1-*`, destroy when idle, $12 total cap.
   - Where things are: build `vast/results/s5p80/` (metrics, reports, netlist) and the full fetched run
     `~/work/bpx1_vast/h_s5p80/runs/wokwi` (WSL); copied into the repository: docs/mosaic_step5_build/ (metrics,
     area by block, STA per corner, loop warning).
+- 27 Nov, step 6 completed (documents, then the review fix-ups below; no change to the synthesised design, the
+  model or the flow) **(VERIFIED, this session, unless marked)**.
+  - Merged into `mosaic`: `docs-final` (the round's document rewrite; no conflict) as `b504a9f`, then `campaign`
+    (the fault-injection simulator, runner, validation and results under `explore/`) as `b845f5c`. One conflict,
+    `docs/fault_campaign.md` (added on both): kept the `docs-final` copy, the corrected one; it is the campaign's
+    last commit `4041870` plus corrections (33 ns time table, mask built since step 5, per-predictor counts from the
+    pins), nothing of the campaign missing. `docs-exp` was already in as `docs/experiments.md`.
+  - `explore/bpsim.cc` after the merge: compiles with `-Wall -Wshadow` without a warning (the old `pr` shadow
+    warning is gone); `cosim/bpsim.cfg` with W=8 on coremark gives the same counts as `69d0bf4` (default 74,201 /
+    74,094 mispredictions sequential / CPU, bimodal 105,207, gshare 124,195, tournament 94,914); the merged
+    simulator only adds two columns.
+  - Every gap left by `docs-final` for the final figures filled from step 5 above and `docs/mosaic_step5_build/`, `docs/cosim*.md`,
+    `docs/coverage_bins.md`, `src/config.json`; the figures given by the verification session agreed with those
+    files. Consistency pass: statistics offload (two counters, 0x09–0x0E read 0, per-predictor counts from the
+    pins, `host/bpx1.py`), density 80 with its reason in docs/area.md, 33 ns, mask, strap, canary lead as
+    measured, coverage 295/295, the probes' CI, the step-5 mutation list. Not measured for the final build: the
+    write-pulse widths and Tiny Tapeout's `--print-stats` utilisation (marked DON'T KNOW in timing.md and area.md).
+  - CI of the probes: `probe-leaky` `b428b21` and `probe-ro` `67eaabd`: gds, precheck, gl_test, viewer, test, docs
+    success (runs 45862940558, 45889703170). CI of `mosaic`: `2837285` (step 3, the first with `src/bpx.sdc`) and
+    `ca279c9` (step 4) gds, test, docs success; `69d0bf4`: test and docs success, gds still running when last read
+    (02:50 UTC; public API, then rate-limited) **(VERIFIED, public GitHub API)**. Open: the gds result of `69d0bf4`
+    and the CI of the step-6 commit (the lead reads them from the web page).
+  - **Review fix-ups** (an independent review of the round found no blocker; its "should fix" items and notes, and
+    what was done):
+    1. The canary self-test (CTEST) inverts both shadow samples at once, so no test showed that each half works
+       alone: the reviewer's mutant `can_hit = cap_q & (pred ^ can_s[0])` (CONF half blind) passed everything. New
+       cocotb test `canary_halves` (RTL only): with CTEST off it forces the shadow flop of one half (`u_s` output of
+       `g_b[0]` PRED, then `g_b[1]` CONF; in the flip-flop model the matching bit of `rs`) to the opposite of its
+       real flop at an acknowledged predict: FSTAT = CANARY and event 4 for one clock, for each half alone; nothing
+       when neither is forced. The reviewer's mutant now fails it ("CONF half forced: FSTAT 0x0000"). On silicon
+       the limit remains: CTEST exercises the pair, and a blind half would show only as "the canary never fires
+       before the first wrong reply" (experiments.md, experiment 6).
+    2. A soft reset (CMD bit 0) while OP = 3, CSn = 0, MOSI = 1 are on the pins (a real host produces this: the last
+       bit of CMD 0x0001 is 1) must clear the tables and leave KEPT = 0: added to cocotb `strap_reset` (RTL and gate
+       level). The reviewer's mutant `kept <= strap` fails it ("must leave KEPT = 0").
+    3. The MASK staging rule (a CTRL[15] change invalidates the staging register) was caught only in concurrent
+       random runs. New cocotb test `mask_staging` (RTL only): 24 rounds of a staged branch in flight, an optional
+       flipped bit in its twin entry, TWIN_EN + SEC-DED + RESTORE, MASK switched, the branch resolved, the twin
+       compared with the model. Removing the rule fails it in round 12 (twin entry 1 differs).
+    4. Formal (inside `ifdef FORMAL` only): the cover the documents claimed is added, `wd_cnt == 12`, reached in
+       step 22 (the assertion `wd_cnt <= 12` stays proven); a cover of the strapped reset's own clear executing
+       with `clr_exec && !clr_tab` (reached in step 2), with a comment that the keeping of the contents is checked
+       in simulation; the tautological assertion `clr_exec && !clr_tab -> kept && init_pend && !clrp_pend` is
+       replaced by one with an independent tracker `f_sc` (set from the pins at a strapped pin reset, cleared by
+       the first clear): `clr_tab == !(f_sc && !clrp_pend)` for every clear outside reset, and
+       `f_sc == (kept && init_pend)`. `prove` (k-induction, 4 minutes), `cover` (15 of 15 reached) and `nowait`
+       pass.
+    5. `cosim/random.sh` rebuilt the Verilator model only when `cosim.cpp` changed and `cosim/run.sh` watched only
+       two RTL files: both now rebuild when any `src/*.v` or `cosim/cosim.cpp` is newer than the binary.
+    6. `host/bpx1.py` `TTPins.reset()` drove REQ = 0 without updating the host object's copy of the pins, so the
+       next request could drive no edge and hang: it now keeps the REQ level through the reset (not run on
+       hardware). docs/SPEC.md 4: the divided ring signal (event 8) reaches the DBG pin through one synchroniser
+       flop and the event multiplexers, so single edges may be metastable; frequency counting only.
+    7. The design is unchanged: `src/` of `69d0bf4` and of this commit synthesised with the same Yosys script
+       (repository cell exclusions, `synth -top bpx_chip`, `write_verilog -noattr`) give byte-identical netlists;
+       preprocessed without FORMAL, the sources differ only in blank lines.
+    Runs after the fix-ups: cocotb latch cells / flip-flop model / repository top 13/13 each (`tb3.sh`; gate level
+    not rerun here: CI's gl_test runs it); random 4 × 50,000 (`rnd2.sh`): plain 200,022 requests, 0 reply,
+    statistics, state and pin-count mismatches, coverage cross 52/52, other 243/243; concurrent 200,023 requests,
+    0 mismatches, 3,780 background checks, pin totals equal to the model.
+  - `git diff --stat 69d0bf4` of the step-6 commit: `docs/`, `README.md`, `explore/`, and for the review fix-ups
+    `test/test.py`, `src/bpx_core.v` (inside `ifdef FORMAL` only), `cosim/random.sh`, `cosim/run.sh`,
+    `host/bpx1.py`; `info.yaml` and every flow setting unchanged. Open, the lead's step: merge to `main`, tag, CI
+    of `main`; the rented machine's spend and destruction (HANDOVER 8).
